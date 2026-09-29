@@ -1,0 +1,28 @@
+{
+  "Rules": [
+    {
+      "ID": "backstop-d7",
+      "Status": "Enabled",
+      "Filter": { "Prefix": "d7/" },
+      "Expiration": { "Days": 8 }
+    },
+    {
+      "ID": "backstop-d30",
+      "Status": "Enabled",
+      "Filter": { "Prefix": "d30/" },
+      "Expiration": { "Days": 31 }
+    },
+    {
+      "ID": "backstop-d90",
+      "Status": "Enabled",
+      "Filter": { "Prefix": "d90/" },
+      "Expiration": { "Days": 91 }
+    },
+    {
+      "ID": "abort-multipart",
+      "Status": "Enabled",
+      "Filter": { "Prefix": "" },
+      "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 1 }
+    }
+  ]
+}
