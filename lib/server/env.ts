@@ -4,9 +4,9 @@ import { z } from "zod";
 /**
  * Environment configuration, validated with zod (DEC-029, 08 §9).
  *
- * Phase 0 validates only what exists today. Phase 1 variables (network keys,
- * peppers, Turnstile secret) are listed in .env.example and join this schema
- * when the code that needs them lands.
+ * Phase 1 adds the network key secrets (DEC-032), the IPv6 prefix length and the
+ * local-only default test IP, and requires every Phase 1 service when deployed.
+ * Link and code peppers join in Phase 2.
  */
 
 const APP_ENVS = ["local", "test", "staging", "production"] as const;
@@ -35,6 +35,8 @@ const schema = z.object({
   ORIGIN_SHARED_SECRET: optionalString,
   ORIGIN_SHARED_SECRET_PREVIOUS: optionalString,
   ALLOW_TEST_CLIENT_IP: z.enum(["0", "1"]).optional(),
+  /** Tests and local development only: the client IP assumed when X-Test-Client-IP is absent. */
+  TEST_CLIENT_IP_DEFAULT: optionalString,
 
   DATABASE_URL: optionalString,
 
@@ -49,6 +51,13 @@ const schema = z.object({
   R2_SECRET_ACCESS_KEY: optionalString,
 
   NEXT_PUBLIC_TURNSTILE_SITE_KEY: optionalString,
+
+  NETWORK_KEY_SECRET_CURRENT: optionalString,
+  NETWORK_KEY_SECRET_PREVIOUS: optionalString,
+  NETWORK_KEY_VERSION: z.coerce.number().int().min(1).max(32767).default(1),
+  NETWORK_IPV6_PREFIX_LEN: z.coerce.number().int().min(32).max(128).default(64),
+  /** Kill switches are cached at most this long (03 §10: ≤ 30 s). Tests use 0. */
+  RUNTIME_FLAGS_CACHE_SECONDS: z.coerce.number().int().min(0).max(300).default(30),
 });
 
 type RawEnv = z.infer<typeof schema>;
@@ -66,6 +75,10 @@ export type Env = RawEnv & {
   isHttps: boolean;
   /** The X-Test-Client-IP override may be honoured (never in production builds). */
   testClientIpAllowed: boolean;
+  /** Client IP assumed without X-Test-Client-IP; only when testClientIpAllowed. */
+  testClientIpDefault: string | undefined;
+  /** Network key secrets by version, current first (DEC-032). Empty when not configured. */
+  networkKeys: { version: number; secret: string }[];
 };
 
 /** Thrown when the environment is invalid. Messages name variables, never values. */
@@ -86,6 +99,31 @@ const SECRETS: (keyof RawEnv)[] = [
   "ORIGIN_SHARED_SECRET_PREVIOUS",
   "SUPABASE_SECRET_KEY",
   "R2_SECRET_ACCESS_KEY",
+  "NETWORK_KEY_SECRET_CURRENT",
+  "NETWORK_KEY_SECRET_PREVIOUS",
+];
+
+/** Secrets that must be long random values wherever they are set. */
+const MIN_LENGTH_SECRETS = [
+  "ORIGIN_SHARED_SECRET",
+  "ORIGIN_SHARED_SECRET_PREVIOUS",
+  "NETWORK_KEY_SECRET_CURRENT",
+  "NETWORK_KEY_SECRET_PREVIOUS",
+] as const;
+
+/** Everything Phase 1 needs to serve local sharing; required in staging and production. */
+const REQUIRED_WHEN_DEPLOYED: (keyof RawEnv)[] = [
+  "DATABASE_URL",
+  "NEXT_PUBLIC_SUPABASE_URL",
+  "NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY",
+  "R2_ACCOUNT_ID",
+  "R2_BUCKET",
+  "R2_S3_ENDPOINT",
+  "R2_ACCESS_KEY_ID",
+  "R2_SECRET_ACCESS_KEY",
+  "NETWORK_KEY_SECRET_CURRENT",
+  // Supabase Auth verifies the Turnstile token on anonymous sign-in (DV1-9).
+  "NEXT_PUBLIC_TURNSTILE_SITE_KEY",
 ];
 
 function parseOrigin(value: string): string | null {
@@ -133,11 +171,25 @@ export function parseEnv(source: Record<string, string | undefined>): Env {
   const originSecrets = [raw.ORIGIN_SHARED_SECRET, raw.ORIGIN_SHARED_SECRET_PREVIOUS].filter(
     (s): s is string => typeof s === "string",
   );
-  for (const key of ["ORIGIN_SHARED_SECRET", "ORIGIN_SHARED_SECRET_PREVIOUS"] as const) {
+  for (const key of MIN_LENGTH_SECRETS) {
     const value = raw[key];
     if (value !== undefined && value.length < MIN_SECRET_LENGTH) {
       issues.push(`${key}: must be at least ${MIN_SECRET_LENGTH} characters`);
     }
+  }
+
+  const networkKeys: { version: number; secret: string }[] = [];
+  if (raw.NETWORK_KEY_SECRET_CURRENT) {
+    networkKeys.push({ version: raw.NETWORK_KEY_VERSION, secret: raw.NETWORK_KEY_SECRET_CURRENT });
+    if (raw.NETWORK_KEY_SECRET_PREVIOUS) {
+      if (raw.NETWORK_KEY_VERSION < 2) {
+        issues.push("NETWORK_KEY_VERSION: must be 2 or more when NETWORK_KEY_SECRET_PREVIOUS is set");
+      } else {
+        networkKeys.push({ version: raw.NETWORK_KEY_VERSION - 1, secret: raw.NETWORK_KEY_SECRET_PREVIOUS });
+      }
+    }
+  } else if (raw.NETWORK_KEY_SECRET_PREVIOUS) {
+    issues.push("NETWORK_KEY_SECRET_CURRENT: required when NETWORK_KEY_SECRET_PREVIOUS is set");
   }
   if ((raw.TRUST_PROXY_MODE === "cloudflare" || isDeployed) && !raw.ORIGIN_SHARED_SECRET) {
     issues.push("ORIGIN_SHARED_SECRET: required in staging, production and whenever TRUST_PROXY_MODE=cloudflare (origin lock, DEC-004)");
@@ -145,6 +197,12 @@ export function parseEnv(source: Record<string, string | undefined>): Env {
 
   if (raw.NODE_ENV === "production" && raw.ALLOW_TEST_CLIENT_IP === "1") {
     issues.push("ALLOW_TEST_CLIENT_IP: must not be set in a production build (the process refuses to start)");
+  }
+  if (raw.TRUST_PROXY_MODE === "cloudflare" && raw.ALLOW_TEST_CLIENT_IP === "1") {
+    issues.push("ALLOW_TEST_CLIENT_IP: must not be set when TRUST_PROXY_MODE=cloudflare (real client IPs are in use)");
+  }
+  if (raw.TEST_CLIENT_IP_DEFAULT !== undefined && (raw.NODE_ENV === "production" || isDeployed)) {
+    issues.push("TEST_CLIENT_IP_DEFAULT: tests and local development only (refused in production builds and deployments)");
   }
 
   if (isDeployed) {
@@ -165,6 +223,9 @@ export function parseEnv(source: Record<string, string | undefined>): Env {
         issues.push(`${key}: looks like a placeholder value`);
       }
     }
+    for (const key of REQUIRED_WHEN_DEPLOYED) {
+      if (raw[key] === undefined) issues.push(`${key}: required in staging and production`);
+    }
   }
 
   for (const [group, keys] of Object.entries(GROUPS)) {
@@ -177,6 +238,11 @@ export function parseEnv(source: Record<string, string | undefined>): Env {
 
   if (issues.length > 0) throw new EnvError(issues);
 
+  // The override also needs APP_ENV set explicitly (it defaults to "local"), so a host that
+  // forgets APP_ENV can't enable it by accident.
+  const explicitTestEnv = cleaned.APP_ENV === "local" || cleaned.APP_ENV === "test";
+  const testClientIpAllowed =
+    raw.ALLOW_TEST_CLIENT_IP === "1" && raw.NODE_ENV !== "production" && !isDeployed && explicitTestEnv;
   return {
     ...raw,
     appOrigin: appOrigin as string,
@@ -184,8 +250,9 @@ export function parseEnv(source: Record<string, string | undefined>): Env {
     originSecrets,
     isDeployed,
     isHttps: (appOrigin as string).startsWith("https://"),
-    testClientIpAllowed:
-      raw.ALLOW_TEST_CLIENT_IP === "1" && raw.NODE_ENV !== "production" && !isDeployed,
+    testClientIpAllowed,
+    testClientIpDefault: testClientIpAllowed ? raw.TEST_CLIENT_IP_DEFAULT : undefined,
+    networkKeys,
   };
 }
 

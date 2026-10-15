@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Document status | PROPOSED |
-| Last updated | 2026-09-23 (CR-001; Phase 0 test harness implemented) |
+| Last updated | 2026-10-15 (Phase 1 suites implemented: §3 as built, §4.11 test map incl. the security review and second-pass tests; RustFS instead of MinIO; §8 points to the Phase 1 manual procedure) |
 | Applies to | All phases. Each phase document lists which tests from this catalogue it must deliver. |
 
 ---
@@ -13,7 +13,7 @@
 1. **Test-first** for services, SQL functions and every security-critical rule (authorization, claims, quotas, tokens).
 2. **Every authorization rule has positive and negative tests.** Access-denied tests matter more than happy paths.
 3. **Real Postgres for authorization and concurrency.** No database mocks for policy logic. Use the local Supabase stack.
-4. **Storage:** unit tests mock the S3 client. Integration tests use MinIO. **Nightly contract tests against a real R2 staging bucket** cover R2-specific behaviour.
+4. **Storage:** unit tests mock the S3 client. Integration tests use an S3-compatible server (**RustFS** since Phase 1: MinIO no longer publishes images, phase 1 DV1-4). **Nightly contract tests against a real R2 staging bucket** cover R2-specific behaviour.
 5. **Multi-device end-to-end tests:** Playwright browser contexts act as separate devices on simulated networks.
 6. **Evidence-based verification:** a phase is `VERIFIED` only with recorded evidence for every acceptance criterion (§9).
 
@@ -60,6 +60,14 @@ The ASN override follows the same rule as the IP override: honoured only in test
 **Documentation ranges (found in Phase 0):** the fixtures use RFC 5737 / RFC 3849 documentation addresses (`203.0.113.0/24`, `198.51.100.0/24`, `2001:db8::/32`), which the production rules reject as non-global. `normalizeClientIp` accepts them only with `allowDocumentationRanges`, which `resolveClientIp` sets **only for the test override**. Addresses arriving through Cloudflare never get this exemption (covered by a unit test).
 
 **As implemented in Phase 0:** the override is honoured only when `ALLOW_TEST_CLIENT_IP=1`, `NODE_ENV` is not `production`, and `APP_ENV` is `local` or `test`. `proxy.ts` strips `X-Test-Client-IP` from every request otherwise.
+
+**As implemented in Phase 1:**
+
+- Test servers are the production build started with `NODE_ENV=test` (`next start` keeps it), so the override works there while deployments (`NODE_ENV=production`) refuse it (F1-8).
+- Tests use a **random IPv6 /64 per test** (`2001:db8:xxxx:yyyy::/64`) instead of fixed fixtures, so repeated runs never accumulate presence and trip `too_large`. Relay and blocked networks are made by inserting an egress range or setting a space's status for that random network.
+- `TEST_CLIENT_IP_DEFAULT` (local development only) gives requests without the header one simulated network, so two local browsers share it.
+- The `mobileAsn` and `cgnatV4` fixtures don't apply until SP-04 (no ASN list, no dual-stack binding).
+- In Playwright, each browser context is a device and adds `X-Test-Client-IP` only to same-origin `/api/v1/` requests (route interception), so storage and Supabase calls are unchanged.
 
 ---
 
@@ -171,6 +179,31 @@ IDs are stable. Phase documents reference them.
 | T-053 | Anonymous → permanent keeps shares ("My uploads") and private-room memberships. Merge requires a valid anonymous token and cannot take over another user's anonymous data. | Integration | 4 |
 | T-054 | Cross-workspace isolation, admin vs member actions, seat-limit race, retention policy, branding assets PNG/JPEG only | Integration + concurrency | 5 |
 
+### 4.11 Phase 1 test map (as built, 2026-10-15)
+
+| Tests | Where |
+|---|---|
+| T-005 (real loader with fixture lists, merged ranges, exact-address matching, refusal to empty a list) | `tests/integration/egress-loader.test.ts`, `tests/unit/egress-loader.test.ts` |
+| No client address reaches Postgres, even with full statement logging (phase 1 F1-13) | `tests/integration/ip-logging.test.ts`, `tests/unit/egress-list.test.ts`, pgTAP (no `inet` arguments, prefix limits) |
+| Upload URLs after a share ends: tombstones, 412 on re-PUT, URL expiry recorded and capped, completion deadline (phase 1 F1-12, F1-15) | `tests/integration/uploads.test.ts`, pgTAP (`claim_object_deletions`) |
+| T-009 fallback without SP-04: IPv4 and IPv6 networks never merge | `tests/integration/local-sharing.test.ts` |
+| R2 lifecycle and CORS files match the code (AC-1.8 config part) | `tests/unit/r2-config.test.ts` |
+| Emulated phones (WebKit iPhone, Chromium Pixel): layout and upload flow, **not real-device evidence** | `tests/e2e/local-mobile.spec.ts` |
+| Phone-width layout at 320–430 px (header labels on one line, dialog title clear of the close button, no sideways scroll) and one-row header at 768/1280 px | `tests/e2e/local-layout.spec.ts` |
+| Audience line only under the composer; status bar "This network · N devices here now" | `tests/component/local-ui.test.tsx`, `tests/e2e/local-sharing.spec.ts` |
+| Stale egress lists fail closed, write-once uploads and stored-header check (security review M1, M2) | `tests/unit/egress-list.test.ts`, `tests/integration/uploads.test.ts`, `supabase/tests/phase1_local_sharing.test.sql` |
+| T-001, T-002, T-003, T-004, T-005 (lists), T-007, T-011, T-013, T-014, T-041 | `tests/integration/local-sharing.test.ts`; T-001/T-002/T-003/T-011 also `tests/e2e/local-sharing.spec.ts` |
+| T-006, T-023, T-024 (unit), T-025 (unit) | `tests/unit/network-key.test.ts`, `filenames.test.ts`, `storage-keys.test.ts`, `sniff.test.ts` |
+| T-008 | `tests/e2e/origin-lock.spec.ts` (Phase 0) and `tests/unit/network-client-ip.test.ts` |
+| T-010, T-046, T-047, T-049 | `tests/integration/api-hygiene.test.ts` |
+| T-015, T-016, T-017, T-018 (delivery) | `tests/integration/realtime.test.ts` |
+| T-018 (payload allow-list), T-022, T-042, guards, quota ledger, topic authorization | `supabase/tests/phase1_local_sharing.test.sql` |
+| T-019, T-020, T-021, T-024, T-025, T-026, T-027, T-028 (preview), 100 MB single PUT | `tests/integration/uploads.test.ts` |
+| IDOR matrix (§5) | `tests/integration/authz-matrix.test.ts` (fails if a route or method has no entry) |
+| T-048 | `tests/e2e/smoke.spec.ts` and zero-violation checks in `tests/e2e/local-sharing.spec.ts` |
+| Cache removal on network change (T-003, RISK-027), API client, uploader store, status copy, share card | `tests/unit/client-*.test.ts`, `tests/component/local-ui.test.tsx` |
+| T-009 | Not applicable until SP-04 adopts the dual-stack probe |
+
 ---
 
 ## 5. IDOR matrix as code
@@ -216,6 +249,8 @@ Coverage is a signal, not a goal. **Requirement:** 100% of authorization matrix 
 ---
 
 ## 8. Manual device and network matrix (Phases 1–3 verification)
+
+Phase 1's executable procedure, with steps, expected results and the recording sheet, is [phases/phase-1-manual-verification.md](phases/phase-1-manual-verification.md). Real-device tests need staging behind Cloudflare: a phone on the developer's Wi-Fi presents a private address and local sharing is `unavailable`.
 
 | Devices / browsers | Networks |
 |---|---|

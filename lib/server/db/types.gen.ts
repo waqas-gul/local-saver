@@ -25,6 +25,124 @@ export type JsonValue = JsonArray | JsonObject | JsonPrimitive;
 
 export type Timestamp = ColumnType<Date, Date | string, Date | string>;
 
+export interface AppAuditEvents {
+  action: string;
+  actor_device_id: string | null;
+  actor_kind: string;
+  actor_user_id: string | null;
+  id: Generated<Int8>;
+  metadata: Generated<Json>;
+  network_space_id: string | null;
+  occurred_at: Generated<Timestamp>;
+  retention_until: Generated<Timestamp>;
+  target_id: string | null;
+  target_type: string | null;
+}
+
+export interface AppDevices {
+  created_at: Generated<Timestamp>;
+  id: Generated<string>;
+  label: string;
+  last_seen_at: Generated<Timestamp>;
+  platform: Generated<string>;
+  revoked_at: Timestamp | null;
+  user_id: string;
+}
+
+export interface AppDownloads {
+  actor_kind: string;
+  created_at: Generated<Timestamp>;
+  device_id: string | null;
+  event: string;
+  file_id: string | null;
+  id: Generated<Int8>;
+  network_space_id: string | null;
+  retention_until: Timestamp;
+  share_id: string;
+  url_expires_at: Timestamp | null;
+  user_agent_family: string | null;
+  user_id: string | null;
+}
+
+export interface AppFiles {
+  created_at: Generated<Timestamp>;
+  declared_mime: string;
+  declared_size_bytes: Int8;
+  detected_mime: string | null;
+  extension: Generated<string>;
+  id: Generated<string>;
+  network_space_id: string | null;
+  object_deleted_at: Timestamp | null;
+  object_key: string;
+  original_name: string;
+  position: Generated<number>;
+  preview_kind: Generated<string>;
+  rejection_reason: string | null;
+  risk_flags: Generated<string[]>;
+  scan_status: Generated<string>;
+  share_id: string;
+  size_bytes: Int8 | null;
+  stored_content_type: string;
+  upload_expires_at: Timestamp;
+  upload_mode: Generated<string>;
+  upload_status: Generated<string>;
+  upload_url_expires_at: Timestamp | null;
+  verified_at: Timestamp | null;
+}
+
+export interface AppIdempotencyKeys {
+  created_at: Generated<Timestamp>;
+  endpoint: string;
+  expires_at: Generated<Timestamp>;
+  key_hash: Buffer;
+  response: Json;
+  user_id: string;
+}
+
+export interface AppNetworkEgressRanges {
+  cidr: string;
+  id: Generated<Int8>;
+  source: string;
+  updated_at: Generated<Timestamp>;
+}
+
+export interface AppNetworkPresence {
+  device_id: string;
+  first_seen_at: Generated<Timestamp>;
+  last_seen_at: Generated<Timestamp>;
+  present_until: Timestamp;
+  space_id: string;
+  user_id: string;
+}
+
+export interface AppNetworkSpaces {
+  created_at: Generated<Timestamp>;
+  devices_24h: Generated<number>;
+  family: number;
+  id: Generated<string>;
+  key_version: number;
+  last_seen_at: Generated<Timestamp>;
+  last_share_at: Timestamp | null;
+  network_key: Buffer;
+  status: Generated<string>;
+  status_reason: string | null;
+  status_until: Timestamp | null;
+}
+
+export interface AppObjectDeletions {
+  attempts: Generated<number>;
+  completed_at: Timestamp | null;
+  id: Generated<Int8>;
+  last_error: string | null;
+  locked_until: Timestamp | null;
+  not_before: Generated<Timestamp>;
+  object_key: string;
+  reason: string;
+  requested_at: Generated<Timestamp>;
+  source_file_id: string | null;
+  tombstoned_at: Timestamp | null;
+}
+
 export interface AppRateCounters {
   expires_at: Timestamp;
   key: string;
@@ -41,7 +159,85 @@ export interface AppRuntimeFlags {
   value: Generated<Json>;
 }
 
+export interface AppShares {
+  billing_subject_id: string;
+  billing_subject_type: string;
+  burn_after_download: Generated<boolean>;
+  created_at: Generated<Timestamp>;
+  created_by_device_id: string | null;
+  created_by_user_id: string | null;
+  end_reason: string | null;
+  ended_at: Timestamp | null;
+  entitlement_snapshot: Json;
+  expires_at: Timestamp | null;
+  file_count: Generated<number>;
+  id: Generated<string>;
+  kind: string;
+  metadata_purge_after: Timestamp | null;
+  network_space_id: string | null;
+  retention_class: string;
+  scope: string;
+  status: string;
+  title: string | null;
+  total_bytes: Generated<Int8>;
+  updated_at: Generated<Timestamp>;
+}
+
+export interface AppStorageReservations {
+  bytes: Int8;
+  created_at: Generated<Timestamp>;
+  expires_at: Timestamp;
+  file_id: string | null;
+  id: Generated<string>;
+  settled_at: Timestamp | null;
+  status: Generated<string>;
+  subject_id: string;
+  subject_type: string;
+}
+
+export interface AppStorageUsage {
+  bytes_committed: Generated<Int8>;
+  bytes_reserved: Generated<Int8>;
+  files_committed: Generated<number>;
+  subject_id: string;
+  subject_type: string;
+  updated_at: Generated<Timestamp>;
+}
+
+export interface AppTextItems {
+  content: string | null;
+  content_bytes: number;
+  network_space_id: string | null;
+  share_id: string;
+  updated_at: Generated<Timestamp>;
+  updated_by_device_id: string | null;
+  version: Generated<number>;
+}
+
+export interface AppUserFlags {
+  notes: string | null;
+  reason: string | null;
+  suspended_at: Timestamp | null;
+  updated_at: Generated<Timestamp>;
+  upload_restricted: Generated<boolean>;
+  user_id: string;
+}
+
 export interface DB {
+  "app.audit_events": AppAuditEvents;
+  "app.devices": AppDevices;
+  "app.downloads": AppDownloads;
+  "app.files": AppFiles;
+  "app.idempotency_keys": AppIdempotencyKeys;
+  "app.network_egress_ranges": AppNetworkEgressRanges;
+  "app.network_presence": AppNetworkPresence;
+  "app.network_spaces": AppNetworkSpaces;
+  "app.object_deletions": AppObjectDeletions;
   "app.rate_counters": AppRateCounters;
   "app.runtime_flags": AppRuntimeFlags;
+  "app.shares": AppShares;
+  "app.storage_reservations": AppStorageReservations;
+  "app.storage_usage": AppStorageUsage;
+  "app.text_items": AppTextItems;
+  "app.user_flags": AppUserFlags;
 }

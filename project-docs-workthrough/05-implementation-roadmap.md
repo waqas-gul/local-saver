@@ -4,7 +4,7 @@
 |---|---|
 | Document status | PROPOSED — awaiting owner review |
 | Last updated | 2026-09-29 (shadcn/ui installed, database baseline executed locally). Earlier: 2026-09-23 (CR-001) |
-| Implementation authorized | **Phase 0 only** (owner, 2026-09-23). Phase 1 is not authorized. |
+| Implementation authorized | Phase 0 (owner, 2026-09-23). **Phase 1** (owner, 2026-10-15, before Phase 0 is VERIFIED; phase 1 §17.1). Phase 2 is not authorized. |
 
 ---
 
@@ -35,7 +35,7 @@ Status vocabulary: `NOT STARTED` · `PLANNED` · `IN PROGRESS` · `BLOCKED` · `
 | Phase | Goal | Key deliverables | Depends on | Relative size | Status |
 |---|---|---|---|---|---|
 | [0 — Foundation](phases/phase-0-foundation.md) | De-risk the platform and establish tooling, infrastructure and security skeleton | Repo hygiene, CI, test harnesses, Supabase/R2/Cloudflare environments, `proxy.ts` headers and origin lock, baseline schema, shadcn/ui, **spikes SP-01…SP-04**, accepted decisions | Owner review of this plan | M | **BLOCKED on owner items** (all in-repo work done and verified locally, 2026-09-29; see phase 0 §18) |
-| [1 — Anonymous local sharing](phases/phase-1-local-sharing.md) | Devices on the same network automatically see each other's text and files (≤ 100 MB) in realtime, with no join step. Other networks see nothing. | Anonymous devices, network keys, presence, fail-closed guards, local feed, "My uploads", text items, direct-to-R2 upload, downloads, realtime, **frontend state layers** (Zustand, TanStack Query, Realtime bridge; DEC-034), request-time expiry + basic jobs, quotas and rate limits | Phase 0 VERIFIED, Q-029/Q-030 answered | L | PLANNED (detailed scope) |
+| [1 — Anonymous local sharing](phases/phase-1-local-sharing.md) | Devices on the same network automatically see each other's text and files (≤ 100 MB) in realtime, with no join step. Other networks see nothing. | Anonymous devices, network keys, presence, fail-closed guards, local feed, "My uploads", text items, direct-to-R2 upload, downloads, realtime, **frontend state layers** (Zustand, TanStack Query, Realtime bridge; DEC-034), request-time expiry + basic jobs, quotas and rate limits | Phase 0 VERIFIED, Q-029/Q-030 answered | L | **NEEDS REVIEW** (implemented and tested on the local stack 2026-10-15; staging, manual matrix and owner review open; see phase 1 §18) |
 | [2 — Remote secure sharing](phases/phase-2-remote-sharing.md) | Explicit, secure sharing across networks | Share links (fragment secret, creator only), link grants, share page, QR, short codes, link-only posting, abuse reporting and takedown, executable policy | Phase 1 VERIFIED, Q-010/Q-027/Q-028 answered | L | PLANNED (detailed scope) |
 | [3 — Expiry, cleanup, one-time download](phases/phase-3-expiry-one-time-download.md) | Reliable storage lifecycle and burn-after-download | Deletion outbox + storage janitor, full job catalogue, reconciliation, tombstones, anonymous user cleanup, burn claim/grace, **public beta launch gate** | Phase 2 VERIFIED | L | PLANNED (detailed scope) |
 | [4 — Accounts, entitlements, Pro, billing](phases/phase-4-pro-accounts.md) | Paid Pro plan with server-enforced limits | Accounts and anonymous upgrade/merge, entitlements engine, billing (merchant of record), multipart 5 GB uploads, 30/90-day expiry, passwords, private rooms (with members, invites and QR pairing), room links, history, device management | Phase 3 VERIFIED, Q-005/006/007/014/015 answered | XL | PLANNED (outline) |
@@ -145,6 +145,8 @@ Paths follow the target layout in [02 §7](02-system-architecture.md#7-applicati
 
 ### Phase 1
 
+**As built (2026-10-15):** the module layout in [02 §7](02-system-architecture.md#7-application-module-layout-target) lists the files that exist. Differences from the plan below: no `network/probe.ts` or probe route (DV1-3); no `quota/` folder (reservations are SQL functions called from `shares/create.ts` and `shares/complete.ts`); `lib/client/{turnstile.ts, runtime.tsx, use-network.ts, linkify.ts}`, `lib/client/queries/{keys.ts, shares.ts}`, `lib/client/stores/{session.ts, presence.ts, uploads.ts, ui-store.ts}`, `components/local/*`, `scripts/local-stack.cjs`, `supabase/seed.sql`, `tests/integration/**`, `tests/e2e/local-sharing.spec.ts`.
+
 | Action | Path |
 |---|---|
 | Modify | `app/page.tsx` ("This network" home), `app/layout.tsx` (Supabase and Turnstile providers), `proxy.ts` (Supabase session refresh) |
@@ -222,13 +224,12 @@ Paths follow the target layout in [02 §7](02-system-architecture.md#7-applicati
 | 0 ✅ | `@tanstack/react-query` 5.103, `zustand` 5.0 | Server state and client-only state (DEC-034). **Moved from Phase 1 at the owner's request (DV-1).** Providers only in Phase 0. |
 | 0 ✅ | `@types/node` 20 → 22 (dev) | Matches the Node 22 runtime; required by Vitest 5 |
 | 0 ✅ | shadcn/ui (2026-09-29, DEC-035): `radix-ui` 1.6, `class-variance-authority` 0.7, `cn` 0.4, `lucide-react` 1.48, `tw-animate-css` 1.4; `shadcn` 4.21 (dev: CLI plus its build-time CSS) | UI component system. Current shadcn installs `cn` instead of `clsx` + `tailwind-merge`, and the unified `radix-ui` package instead of per-primitive `@radix-ui/*` packages. `shadcn` was moved from `dependencies` to `devDependencies`. |
-| 1 | `@supabase/supabase-js`, `@supabase/ssr` | Auth sessions, Realtime |
-| 1 | `@tanstack/react-query-devtools` (dev only, kept out of production bundles) | Query debugging |
-| 1 | `@aws-sdk/client-s3`, `@aws-sdk/s3-request-presigner` | R2 presign, head, delete |
-| 1 | `file-type` | Magic-byte sniffing |
-| 1 | `pino` | Structured logs with redaction |
-| 1 | Turnstile integration (small wrapper or `@marsidev/react-turnstile`) | CAPTCHA |
-| 1 | A permissively licensed user-agent parser (for example `bowser`), or a tiny internal parser | Device platform labels. **Avoid AGPL-licensed parsers.** |
+| 1 ✅ | `@supabase/supabase-js` 2.117 | Anonymous Auth sessions (browser) and token verification (server), Realtime |
+| 1 ✅ | `@aws-sdk/client-s3` 3.1151, `@aws-sdk/s3-request-presigner` 3.1151 | R2 presign (signed headers and `Content-Length`), HEAD, ranged GET, delete |
+| 1 ✅ | `get-nonce` 1.0.1 (already in the tree via Radix) | Hands the CSP nonce to Radix's runtime `<style>` tag (phase 1 F1-5) |
+| 1 ✅ | `next` / `eslint-config-next` 16.3.5 → 16.3.8; overrides for `source-map-js`, `sharp`, `@modelcontextprotocol/sdk` | Security advisories (phase 1 F1-6) |
+| 1 ✗ | `@supabase/ssr` | Not used: bearer-token API auth (DV1-14) |
+| 1 ✗ | `file-type`, `pino`, Turnstile wrapper, UA parser, `@tanstack/react-query-devtools` | Not added: small internal modules instead (DV1-7) |
 | 2 | `qrcode` (or equivalent MIT library) | Client-side QR |
 | 3 | Deno `npm:` imports in the Edge Function: `aws4fetch` or `@aws-sdk/client-s3`, `postgres` | Janitor |
 | 4 | `@node-rs/argon2` | Link passwords |

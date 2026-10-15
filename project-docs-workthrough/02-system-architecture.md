@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Document status | PROPOSED — awaiting owner review |
-| Last updated | 2026-09-29 (DEC-035: shadcn/ui initialized). Earlier: 2026-09-23 (CR-001: automatic same-network visibility. DEC-034: frontend state management.) |
+| Last updated | 2026-10-15 (Phase 1 as built: bearer-token API auth, no session refresh in `proxy.ts`, module layout, preview query key; second review pass: principle 8 on raw IPs). Earlier: 2026-09-29 (DEC-035: shadcn/ui initialized); 2026-09-23 (CR-001, DEC-034). |
 | Related decisions | DEC-001 … DEC-035 in [06-decisions-and-risks.md](06-decisions-and-risks.md) |
 | Related docs | Security and network design in [03](03-security-and-network-design.md). Schema, storage and cleanup in [04](04-database-and-storage-design.md). Plans in [07](07-plans-and-entitlements.md). Deployment in [08](08-deployment-and-operations.md). |
 
@@ -18,7 +18,7 @@
 5. **One owner per kind of client state.** Zustand holds client-only state, TanStack Query holds server state, Supabase Realtime only signals changes (DEC-034, §3.3).
 6. **Expiry is enforced at request time.** Cleanup jobs reclaim storage but are never the security boundary (DEC-016).
 7. **Every secret is a hash at rest.** Link secrets, short codes, invite secrets and passwords are stored only as hashes or HMACs (DEC-013, DEC-014, DEC-021).
-8. **Least data.** No raw IPs, no file names in object keys or realtime payloads, text content erased at expiry.
+8. **Least data.** No raw IPs in the app's tables, query parameters or logs (Supabase Auth's own session IPs: Q-031), no file names in object keys or realtime payloads, text content erased at expiry.
 9. **Boring and observable over clever.** Standard SQL, explicit state machines, an outbox for side effects, structured logs with redaction.
 
 ---
@@ -69,7 +69,7 @@ flowchart TB
     ApiClient["API client (fetch, zod-typed DTOs)"]
     Uploader["Uploader (XHR PUT to R2, progress, retry)"]
     Realtime["Realtime subscriber (supabase-js, private channels): signals only"]
-    SbAuth["Supabase Auth client (anonymous / account session cookies)"]
+    SbAuth["Supabase Auth client (anonymous / account session; access token sent as a bearer header)"]
     Turnstile["Turnstile widget"]
     QR["QR renderer (client-side)"]
   end
@@ -77,7 +77,7 @@ flowchart TB
   Edge["Cloudflare: DNS, TLS, WAF, rate limiting, Turnstile verification API, request-header rule adds origin secret"]
 
   subgraph Next["Next.js 16 server (Node.js)"]
-    Proxy["proxy.ts: request id, origin lock, CSP nonce + headers, Supabase cookie refresh"]
+    Proxy["proxy.ts: request id, origin lock, CSP nonce + headers"]
     Routes["Route handlers /api/v1/* (thin)"]
     subgraph DAL["lib/server (import 'server-only')"]
       Auth["auth: session → principal + device"]
@@ -129,7 +129,7 @@ flowchart TB
 | Zustand stores (browser) | Client-only state (§3.3) | Hold server data, secrets or presigned URLs. Persist anything but harmless preferences. |
 | TanStack Query cache (browser) | Server state fetched through `/api/v1` (§3.3) | Outlive the network it came from (removed on network change). Be persisted to storage. |
 | Supabase Realtime client | Live update signals that invalidate or refetch queries | Carry or hold content. Act as a data source. |
-| `proxy.ts` | Request ID, origin-lock check, security headers and CSP nonce, Supabase session-cookie refresh | Authorize access to resources. Query the database. |
+| `proxy.ts` | Request ID, origin-lock check, security headers and CSP nonce. (No session refresh: the browser refreshes its own Supabase session; phase 1 DV1-6.) | Authorize access to resources. Query the database. |
 | Route handlers | Parse and validate input (zod), call one service, map result to DTO and HTTP status | Contain business rules or SQL |
 | Services (`lib/server`) | Authorization, entitlements, quotas, rate limits, state transitions, presigning, audit | Return raw rows to the client. Log secrets. |
 | Postgres | Source of truth. Constraints. Atomic functions (claim, reserve, attempt counters). Triggers that emit realtime signals. Cron state transitions. | Store file bytes, raw IPs or plaintext secrets |
@@ -144,7 +144,7 @@ flowchart TB
 |---|---|---|
 | Internet → Cloudflare | All traffic | TLS, WAF, rate-limit rule, bot protection |
 | Cloudflare → origin | HTTP requests | Origin secret header (Transform Rule) checked in `proxy.ts`. `CF-Connecting-IP` trusted **only** when the secret is valid (DEC-004). Better: Cloudflare Tunnel on a VPS. |
-| Browser → API | JSON over HTTPS with session cookies | JWT verification, device ownership check, Origin check on mutations, zod validation, rate limits |
+| Browser → API | JSON over HTTPS with the Supabase access token as `Authorization: Bearer` (phase 1 DV1-14) | JWT verification, device ownership check, Origin check on mutations, zod validation, rate limits |
 | Browser → R2 | Presigned URLs | Scoped to one object and one method. Short TTL. Content-Type/Disposition signed. Bucket CORS limited to app origins. |
 | Browser → Supabase Realtime | WebSocket with the user's JWT | Private channels only ("Allow public access" disabled). RLS on `realtime.messages`. |
 | Next.js → Postgres | Pooled TCP (TLS) | Dedicated DB role with least privilege on the `app` schema. Credentials in env. |
@@ -180,6 +180,7 @@ flowchart LR
 | `['local', 'feed', spaceIds]` | Local feed for the current network | Realtime-invalidated. Refetch on focus. **Removed when the space IDs change.** |
 | `['share', shareId]` | Share detail, including text | Realtime-invalidated. Removed on `404`/`410`. |
 | `['me', 'shares']` | My uploads (from any network) | Invalidated by `share.changed` on the `user:` topic |
+| `['preview', fileId]` | 300 s preview URL for an image (Phase 1) | Refetched after 4 minutes. Removed with the network's other data. |
 | `['me']`, `['me', 'entitlements']` (Phase 4) | Account, plan, limits | Refetch on focus |
 | `['history', …]` (Phase 4) | Transfer history | On demand |
 | `['link', linkId, 'content']` (Phase 2) | Link-viewer DTO | 30 s refetch interval and on focus. No Realtime. |
@@ -213,7 +214,7 @@ sequenceDiagram
   B->>TS: run managed (usually invisible) challenge
   TS-->>B: captcha token
   B->>SA: signInAnonymously with captcha token
-  SA-->>B: session (sub, role authenticated, is_anonymous true) stored in cookies
+  SA-->>B: session (sub, role authenticated, is_anonymous true) kept by the browser client
   B->>API: POST /api/v1/devices
   API->>API: verify JWT, Origin check, rate limit
   API->>DB: upsert devices row with generated label (for example Blue Fox)
@@ -411,9 +412,9 @@ Policies live on `realtime.messages` and call a `SECURITY DEFINER` helper, `app_
 |---|---|
 | Base path | `/api/v1/…`. Breaking changes go to `/api/v2`. |
 | Format | JSON request and response bodies. Mutating requests must send `Content-Type: application/json`. |
-| Authentication | Supabase session cookies (`@supabase/ssr`). JWT verified on every request (JWKS/`getClaims`, confirmed in SP-03). Link viewers use a separate httpOnly `link_session` cookie. |
+| Authentication | **As built in Phase 1 (DV1-14):** the browser sends its Supabase access token as `Authorization: Bearer …`; the server verifies it on every request (`getClaims`: JWKS with asymmetric keys, otherwise the Auth server) and never refreshes it. An expired token gets 401 and the client refreshes and retries once. (Planned: `@supabase/ssr` session cookies.) Link viewers (Phase 2) use a separate httpOnly `link_session` cookie. |
 | Device binding | `X-Device-Id` header, verified to belong to the authenticated user |
-| CSRF | Mutations require an exact `Origin` match against configured app origins, a JSON content type and SameSite=Lax cookies. GET never mutates. |
+| CSRF | Mutations require an exact `Origin` match against configured app origins and a JSON content type (a body-less `DELETE` needs only the Origin, DV1-13). The bearer header can't be sent by another site. GET never mutates. |
 | Validation | zod schemas in `lib/shared/api/*`, used by both client and server |
 | Errors | `{ "error": { "code": "SHARE_EXPIRED", "message": "…", "requestId": "…" } }`. Resources outside the caller's scope return **404** (not 403) to avoid revealing existence. |
 | Idempotency | `Idempotency-Key` header on share creation, link creation and billing checkout (stored 24 h per user) |
@@ -426,13 +427,15 @@ Policies live on `realtime.messages` and call a `SECURITY DEFINER` helper, `app_
 
 ### 6.2 Endpoint catalogue (by phase)
 
+**Phase 1 rows are implemented** (2026-10-15) except the probe. Request and response contracts: `lib/shared/api/schemas.ts`. `POST /api/v1/shares` and `POST /api/v1/texts` answer `201`; `DELETE` answers `204`. Error codes added in Phase 1: `UNAUTHENTICATED`, `DEVICE_REQUIRED`, `DEVICE_UNKNOWN` (401); `NOT_CREATOR`, `USER_SUSPENDED`, `UPLOADS_RESTRICTED` (403); `NOT_FOUND` (404, also for "not visible"); `LOCAL_SHARING_UNAVAILABLE`, `VERSION_CONFLICT`, `UPLOAD_INCOMPLETE`, `UPLOAD_EXPIRED`, `STORAGE_QUOTA_EXCEEDED` (409); `FILE_TOO_LARGE`, `TOO_MANY_FILES`, `TEXT_TOO_LARGE` (413); `INVALID_EXPIRY`, `UPLOAD_REJECTED`, `PREVIEW_UNAVAILABLE` (422); `RATE_LIMITED`, `DAILY_UPLOAD_LIMIT` (429 with `Retry-After`); `UPLOADS_DISABLED`, `SERVICE_NOT_CONFIGURED` (503).
+
 | Phase | Method & path | Purpose | Caller |
 |---|---|---|---|
 | 0 | `GET /api/v1/health` | Liveness (no dependencies) and readiness (DB reachability) | Monitor |
 | 1 | `POST /api/v1/devices` | Register or refresh the current device | Any session |
 | 1 | `PATCH /api/v1/devices/{deviceId}` | Rename device label | Device owner |
 | 1 | `POST /api/v1/network/observe` | Derive the current network, record presence, return statuses, space IDs and "devices here now" (plus a probe nonce if the dual-stack probe is adopted) | Device |
-| 1 | `GET /api/v1/network/probe?n=` on the `v4.` and `v6.` hostnames (only if SP-04 adopts it) | Record this address family's network key for the nonce. Returns `204`. | Device |
+| 1 | `GET /api/v1/network/probe?n=` on the `v4.` and `v6.` hostnames (only if SP-04 adopts it) | Record this address family's network key for the nonce. Returns `204`. **Not built in Phase 1** (SP-04 not run, phase 1 DV1-3). | Device |
 | 1 | `GET /api/v1/local/shares` | Local feed: active shares on the caller's current eligible network (cursor) | Device on an `ok` network |
 | 1 | `GET /api/v1/me/shares` | My uploads, from any network | Creator |
 | 1 | `POST /api/v1/shares` | Create a file share (`destination: "network"`) and get presigned uploads | Device on an `ok` network |
@@ -482,34 +485,39 @@ app/
   (share)/j/[inviteId]/page.tsx              # private-room invite / pairing accept (Phase 4)
   (legal)/terms, privacy, acceptable-use, report   # Phase 2–3
   api/v1/**/route.ts                         # thin handlers (§6.2)
-proxy.ts                                     # headers/CSP, origin lock, request id (session refresh: Phase 1)
+proxy.ts                                     # headers/CSP, origin lock, request id (no session refresh, DV1-6)
 instrumentation.ts                           # boot-time env validation → lib/server/boot.ts (exits on bad env)
 components.json                              # shadcn/ui CLI configuration (radix-nova, DEC-035)
-components/ui/*                              # shadcn/ui generated components (Phase 0: button)
-components/{local,room,upload,share,qr,common}/*
+components/ui/*                              # shadcn/ui generated: button, card, textarea, badge, dialog, progress, tabs, select, alert
+components/local/*                           # Phase 1: home, composer, share card, feed list, upload queue, My uploads, status, notice, copy.ts
+components/{room,share,qr}/*                 # later phases
 lib/utils.ts                                 # shadcn alias target: re-exports cn()
-lib/shared/                                  # isomorphic: api schemas (zod), constants, formatting
-lib/client/                                  # supabase browser client, uploader, api client
-  providers.tsx                              # 'use client': QueryClientProvider + Zustand store providers (DEC-034)
-  query-client.ts, api-error.ts              # QueryClient defaults and retry policy (Phase 0)
-  queries/                                   # TanStack Query: queryOptions factories and key contracts per resource (Phase 1+)
-  stores/                                    # Zustand: ui (Phase 0); uploads, presence (Phase 1)
-  realtime.ts                                # channel lifecycle + bridge: signals → query invalidation
+lib/shared/
+  api/schemas.ts                             # zod contracts for /api/v1 (server validation + client parsing)
+  plans.ts                                   # Free plan numbers (UI hints; enforced on the server)
+lib/client/
+  providers.tsx                              # 'use client': config, QueryClientProvider, Zustand providers, runtime (DEC-034)
+  config.tsx, runtime.tsx, supabase.ts       # public config from the layout; Supabase client + API client; device bootstrap
+  api-client.ts, api-error.ts, query-client.ts
+  queries/keys.ts, queries/shares.ts         # TanStack Query key contracts and queryOptions factories
+  stores/                                    # Zustand: ui, session, uploads, presence
+  realtime.ts, use-network.ts, network.ts    # signals → query invalidation; observe heartbeat; cache removal on network change
+  uploader.ts, turnstile.ts, linkify.ts
 lib/server/                                  # import 'server-only'
-  env.ts, boot.ts, log.ts                    # zod-validated environment, boot check, JSON logger with redaction
-  config/                                    # typed integration settings (database, Supabase, R2)
-  db/                                        # query layer (Kysely) + generated types
-  http/                                      # handler wrapper: auth, origin, zod, errors, rate limits
-  auth/  policy/  entitlements/  quota/  ratelimit/
-  network/  local/  shares/  links/  storage/  audit/
-  security/                                  # hmac, random ids, timing-safe compare, origin lock, CSP/headers (Phase 0); turnstile, filenames (Phase 1)
-  rooms/ (4)  billing/ (4)  workspaces/ (5)
+  env.ts, boot.ts, log.ts, flags.ts          # environment, boot check, logger, kill switches (≤ 30 s cache)
+  config/  db/  http/
+  auth/ (session.ts, device.ts)  policy/posting.ts  entitlements/plans.ts  ratelimit/limits.ts  audit/log.ts
+  network/ (normalize, client-ip, key, current, observe)  local/visibility.ts
+  shares/ (dto, read, create, complete, text, end, download, expiry)  devices/ (labels, service)
+  storage/ (s3, keys, sniff)  security/ (crypto, ids, origin-lock, headers, filenames, content-disposition, file-risk)
+  links/ (2)  rooms/ (4)  billing/ (4)  workspaces/ (5)
 supabase/
-  config.toml
+  config.toml, seed.sql                      # seed: local-only app_server login
   migrations/*.sql                           # SQL-first, source of truth
   tests/*.test.sql                           # pgTAP
   functions/storage-janitor/index.ts         # Phase 3
-tests/unit · tests/integration · tests/e2e   # Vitest / Vitest+local stack / Playwright
+scripts/local-stack.cjs                      # local stack: RustFS (R2 stand-in), .env.local generator
+tests/unit · tests/component · tests/integration · tests/e2e   # Vitest / Vitest+jsdom / Vitest+next start+local stack / Playwright
 .github/workflows/ci.yml · deploy.yml
 ```
 
@@ -528,7 +536,7 @@ tests/unit · tests/integration · tests/e2e   # Vitest / Vitest+local stack / P
 | Logging | Structured JSON. Redact cookies, `authorization`, `x-origin-auth`, link secrets, codes, probe nonces, passwords and `X-Amz-Signature`. IPs never logged raw. |
 | Accessibility | Radix-based shadcn/ui components. Keyboard-operable upload and download. Live regions for realtime updates. |
 | Internationalization | Out of scope for now. Keep UI copy centralized. |
-| Browser support | Next.js 16 baseline: Chrome/Edge/Firefox 111+, Safari 16.4+ (Q-019) |
+| Browser support | Chrome/Edge 111+, **Firefox 128+**, Safari 16.4+ (Q-019). Next.js 16 alone allows Firefox 111+; Tailwind CSS 4 compiles for Firefox 128. |
 
 ---
 

@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Document status | LIVING DOCUMENT |
-| Last updated | 2026-09-29 (DEC-001 shadcn/ui accepted; DEC-035 UI component system added.) Earlier: 2026-09-23 (CR-001: owner kept automatic same-network visibility. DEC-001 Next.js accepted. DEC-034 frontend state management accepted.) |
+| Last updated | 2026-10-15 (Phase 1 implementation notes on DEC-005, DEC-011, DEC-020, DEC-032; RISK-001, RISK-010 and RISK-016 updated after the Phase 1 security review; RISK-028 added; second review pass: RISK-029 and Q-031 added, Q-019 note (Firefox 128), RISK-010 note; Q-007/019/021/023/029/030 assumed for Phase 1). Earlier: 2026-09-29 (DEC-001 shadcn/ui accepted; DEC-035 UI component system added.) Earlier: 2026-09-23 (CR-001: owner kept automatic same-network visibility. DEC-001 Next.js accepted. DEC-034 frontend state management accepted.) |
 
 ---
 
@@ -82,6 +82,7 @@ Approved by:
 - **Reason:** one `auth.uid()` for anonymous and permanent users, native Realtime authorization, a built-in upgrade path.
 - **Alternatives considered:** own device cookies plus custom JWTs minted with a Supabase-imported signing key (lower MAU cost, more code; kept as an exit ramp). Third-party auth providers (unnecessary).
 - **Risks:** MAU billing for anonymous devices (RISK-006). CAPTCHA applies to every Supabase auth flow once enabled.
+- **Phase 1 implementation (2026-10-15):** anonymous sign-in with a Turnstile token when a site key is configured (required in staging and production), then `POST /api/v1/devices`. The browser keeps its session and sends the access token as a bearer header; the server verifies it and never refreshes it (phase 1 DV1-14, instead of `@supabase/ssr` cookies).
 - **Status:** PROPOSED
 
 ### DEC-006 — Data-access boundary
@@ -132,6 +133,7 @@ Approved by:
 - **Reason:** Postgres Changes is single-threaded with per-subscriber checks. Trigger emission is transactional. Replay storage holds no content. Authorization stays simple.
 - **Alternatives considered:** Postgres Changes, own WebSocket server, Ably/Pusher, Cloudflare Durable Objects.
 - **Risks:** channel authorization is cached per connection, so a device that left a network can receive ID-only signals until its token refreshes (RISK-007). Message retention (RISK-023).
+- **Phase 1 implementation (2026-10-15):** verified on the local Supabase stack (T-015 … T-018): private `net:` and `user:` topics, presence-based join, client broadcasts refused, presence tracking allowed, nothing emitted for rolled-back transactions, a public channel with the same topic receives none of the private signals. Hosted behaviour is still SP-03.
 - **Status:** PROPOSED — verified in SP-03. Revised 2026-09-23 for CR-001 (network topics instead of nearby-room membership).
 
 ### DEC-012 — Content model
@@ -208,6 +210,7 @@ Approved by:
 - **Decision:** a coarse Cloudflare edge rule plus Postgres fixed-window counters (`app.rate_limit_hit`) keyed by device, user, network key, link and room. Turnstile escalation. Move to Redis only if database load requires it.
 - **Reason:** no new vendor for the MVP, works across instances, precise keys.
 - **Alternatives considered:** in-memory limits (lost on restart, per instance), Upstash Redis from day one (extra vendor).
+- **Phase 1 implementation (2026-10-15):** Postgres counters per device, user and network space for every Phase 1 action ([03 §10](03-security-and-network-design.md#10-rate-limiting-and-abuse-protection)); daily volumes counted in KiB. The Cloudflare edge rule waits for the zone (Phase 0).
 - **Status:** PROPOSED
 
 ### DEC-021 — Link password hashing
@@ -322,6 +325,7 @@ Approved by:
   - No guards: leaks immediately on mobile, VPN and relay IPs.
   - Remembering access after a device leaves: contradicts DEC-031.
 - **Risks:** false negatives (RISK-013). Undetected shared IPs (RISK-001). Network keys are pseudonymous personal data.
+- **Phase 1 implementation (2026-10-15):** without SP-04, only the current request's key counts; no dual-stack probe, no ASN list. `shared_egress` comes from the egress-range lists; `too_large` uses the runtime flag `network_large_cap` (50). Key rotation re-keys spaces in place (`app.rekey_network_space`).
 - **Status:** PROPOSED — parameters set by SP-04 and Q-029
 
 ### DEC-033 — Local share permissions and remote reach
@@ -331,7 +335,7 @@ Approved by:
   - Anyone currently on the network can view, download, copy text and report a local share. **Only its creator** can edit text, delete it, and create or revoke links (Q-021). Operators can block.
   - Creators always see their shares under **My uploads**, from any network, and can share them by link from there.
   - Remote links target **one share** (Free) or a **private or workspace room** (Pro/Team). **There is no link to a whole network's feed**: it would expose other people's local uploads off the network (Q-028).
-  - Before posting, the UI states the audience: *"Visible to everyone on this network · 3 devices here now"*. A one-time notice explains that everyone on the same Wi-Fi, including guests, can see and download local posts.
+  - Before posting, the UI states the audience: *"Visible to everyone on this network"* (under the composer); the status bar shows *"This network · 3 devices here now"*. (Phase 1 copy split by the owner on 2026-10-15; phase 1 §18.6.) A one-time notice explains that everyone on the same Wi-Fi, including guests, can see and download local posts.
 - **Reason:** keeps the automatic model while ensuring nobody can delete or export someone else's local post, and that uploaders know who can see it.
 - **Alternatives considered:** anyone present may delete or edit (vandalism on public Wi-Fi); network-wide remote links (exposes others' posts).
 - **Status:** PROPOSED (Q-021, Q-028)
@@ -392,7 +396,7 @@ Likelihood: L/M/H. Impact: L/M/H/Critical. Status: `OPEN` · `MITIGATING` · `AC
 
 | ID | Risk | Likelihood | Impact | Mitigation | Phase | Status |
 |---|---|---|---|---|---|---|
-| RISK-001 | Cross-network exposure: different networks behind one public IP that is not recognized as shared (small-ISP CGNAT, campus or enterprise NAT, VPNs missing from lists) see each other's local content. Inherent to DEC-031. | M (higher at low scale, before shared IPs are detected) | **Critical** | DEC-032 fail-closed guards: Private Relay and Tor lists, VPN/hosting/mobile-carrier ASNs, IPv4-with-several-IPv6 detection, large-network cap. Audience indicator (DEC-033). Report and takedown. Shorter default expiry (Q-030). Tests T-001 … T-010. SP-04 measures it. **Can be reduced, not eliminated.** | 0–1, 6 | OPEN |
+| RISK-001 | Cross-network exposure: different networks behind one public IP that is not recognized as shared (small-ISP CGNAT, campus or enterprise NAT, VPNs missing from lists) see each other's local content. Inherent to DEC-031. | M (higher at low scale, before shared IPs are detected) | **Critical** | DEC-032 fail-closed guards: Private Relay and Tor lists, VPN/hosting/mobile-carrier ASNs, IPv4-with-several-IPv6 detection, large-network cap. Audience indicator (DEC-033). Report and takedown. Shorter default expiry (Q-030). Tests T-001 … T-010. SP-04 measures it. Phase 1: the Apple and Tor lists are loaded by `pnpm egress:load` (weekly runbook), and staging and production **turn local sharing off everywhere** when the lists are missing or older than 14 days (security review M2). **Can be reduced, not eliminated.** | 0–1, 6 | OPEN |
 | RISK-002 | Client-IP spoofing via forwarded headers or origin bypass. Under DEC-031 a forged IP would reveal **any network's local content**. | M | **Critical** | DEC-004 origin lock, Tunnel on VPS, spoofing tests from outside Cloudflare (T-008), production refuses the test IP override | 0–1 | OPEN |
 | RISK-003 | Hostinger platform unknowns (timeouts, streaming, IP headers, pnpm 12, memory, restarts, outbound TCP) | M | H | SP-01 with pass/fail criteria, VPS or Vercel fallback (DEC-022) | 0 | OPEN |
 | RISK-004 | Abuse of free anonymous hosting (malware, phishing, piracy, illegal content, spam) | H | **Critical** | Quotas, rate limits, Turnstile, executable policy, abuse reports, takedown, kill switches, scanning (Phase 6), public beta gate | 1–3, 6 | OPEN |
@@ -401,13 +405,15 @@ Likelihood: L/M/H. Impact: L/M/H/Critical. Status: `OPEN` · `MITIGATING` · `AC
 | RISK-007 | Realtime authorization cached per connection: a device that left a network (or a removed private-room member) keeps receiving ID-only signals until its token refreshes | M | L | ID-only payloads, cooperative unsubscribe on network change, API re-derives the network on every request, presence expires after 10 min, consider 30-min JWT expiry | 1 | ACCEPTED (mitigated) |
 | RISK-008 | One-time download can't confirm completion; partial-download bypass; bots consuming links | H if completion-based | M | DEC-015 burn on claim, POST only, no previews | 3 | OPEN |
 | RISK-009 | Presigned URLs are bearer tokens and can be forwarded within their TTL | M | L | 60 s TTL, attachment disposition, per-link issuance limits, logging | 1–2 | ACCEPTED (mitigated) |
-| RISK-010 | Upload size and type can't be fully enforced before bytes reach R2 (no POST policy) | M | M | Exact size check at completion, delete on mismatch, stale-upload sweep, single-PUT cap 5 GiB, multipart part-count control | 1, 4 | OPEN |
+| RISK-010 | Upload size and type can't be fully enforced before bytes reach R2 (no POST policy) | M | M | **Signed `Content-Length` and `If-None-Match: *` on the presigned PUT** (storage refuses other sizes and any overwrite; verified on RustFS, R2 in SP-02), exact size and stored-header check at completion (no `Content-Encoding`), a deleted object's key held by a tombstone while its upload URL can still be used (phase 1 F1-12), delete on mismatch, stale-upload sweep, single-PUT cap 5 GiB, multipart part-count control | 1, 4 | MITIGATING |
 | RISK-011 | R2 behaviour differs from S3 (response-header overrides, batch delete support, lifecycle lag ≈ 24 h) | M | M | Headers set at upload, SP-02 verification, lifecycle only as backstop | 0–3 | OPEN |
 | RISK-012 | Storage quota races or drift | M | M | Atomic reservation ledger, daily reconciliation with alerts | 1, 3 | OPEN |
 | RISK-013 | Local false negatives: devices on the same Wi-Fi don't see each other (IPv4/IPv6 split, VPN or Private Relay on one device, multi-WAN), or local mode is off (mobile data, most hotspots, large or shared networks) | H | M (UX) | Dual-stack binding (SP-04), clear status copy, link/QR/code fallback (Phase 2), SP-04 measurement | 1–2 | OPEN |
 | RISK-014 | Chrome Local Network Access gating WebRTC breaks the optional LAN-proof experiment | — | — | SP-05 withdrawn by CR-001. No design depends on WebRTC. | — | CLOSED |
 | RISK-015 | Pricing economics: fixed merchant-of-record fees on $3–5 plans; worst-case storage per plan | H | M | $4–5 plus annual plans, total storage quotas, cost model in [07](07-plans-and-entitlements.md) | 4 | OPEN |
-| RISK-016 | Next.js 16 and ecosystem churn (proxy rename, library compatibility with Supabase SSR, shadcn, TanStack Query and Zustand) | M | M | Follow bundled docs (including the TanStack Query guide), pin versions, SP-03 covers `@supabase/ssr` with `proxy.ts`, Renovate/Dependabot with CI | 0+ | OPEN |
+| RISK-016 | Next.js 16 and ecosystem churn (proxy rename, library compatibility with Supabase SSR, shadcn, TanStack Query and Zustand) | M | M | Follow bundled docs (including the TanStack Query guide), pin versions, Renovate/Dependabot with CI. Phase 1: Next.js 16.3.5 → 16.3.8 for advisories published after Phase 0 (F1-6); `@supabase/ssr` not used (DV1-14). | 0+ | OPEN |
+| RISK-028 | A dependency advisory has no fixed release (currently `braces`, reachable only through dev tooling), or a fix is newer than pnpm's minimum release age | M | L | Advisory-specific ignore with the reason in `pnpm-workspace.yaml`; overrides only to versions past the release-age policy; never add release-age exclusions without review (phase 1 F1-6) | All | ACCEPTED (reviewed) |
+| RISK-029 | Supabase Auth stores the client IP of every session (`auth.sessions.ip`) and in its audit log, for as long as the session exists. Anonymous sessions can live for months. The app's own tables, query parameters and logs hold no raw IPs (phase 1 F1-13), but the project's database does. | H | M | Owner decision Q-031: state it in the privacy notice and data inventory (03 §13) at least; options are a retention job for old anonymous sessions and audit entries, Supabase session time-boxing (Pro), or accepting it as Supabase's processing under its DPA | 1, 3 | OPEN (phase 1 F1-14) |
 | RISK-017 | Supabase legacy `anon`/`service_role` keys deprecated by end of 2026 | H | L | Use publishable/secret keys from day one, disable legacy keys | 0 | MITIGATING |
 | RISK-018 | Janitor deletes the wrong objects (data loss) | L | H | Deletes only from DB-generated outbox rows, key regex, active-share guard, dry-run mode, volume anomaly alerts | 3 | OPEN |
 | RISK-019 | Email deliverability for accounts and invitations | M | M | Custom SMTP provider with SPF/DKIM/DMARC, monitoring | 4 | OPEN |
@@ -434,7 +440,7 @@ Status: `OPEN` · `ANSWERED` (record the answer and date, and update affected de
 | Q-004 | Should rooms be discoverable by default on normal networks, and can every plan turn discovery off? | Privacy defaults | — | — | **ANSWERED** 2026-09-23: withdrawn. There is no discovery. An uploader who doesn't want network visibility chooses "Link only" (DEC-033). |
 | Q-005 | In which country is the business registered, and who handles sales tax/VAT? | Billing provider (DEC-023) | Merchant of record unless Stripe plus in-house tax is feasible | Phase 4 | OPEN |
 | Q-006 | Final prices: Pro monthly/annual, Team structure (flat vs per-seat)? | Fee economics, entitlements | Pro $5/mo or $48/yr. Team $15/mo incl. 3 seats + $5/seat. | Phase 4–5 | OPEN |
-| Q-007 | Storage quotas: Free active storage and daily upload, Pro total, Team pooled? | Cost control | Free 2 GB active + 2 GB/day. Pro 100 GB. Team 250 GB pooled + add-ons. | Phase 1, 4, 5 | OPEN |
+| Q-007 | Storage quotas: Free active storage and daily upload, Pro total, Team pooled? | Cost control | Free 2 GB active + 2 GB/day. Pro 100 GB. Team 250 GB pooled + add-ons. | Phase 1, 4, 5 | OPEN — Phase 1 assumes the recommendation (phase 1 §17.2) |
 | Q-008 | Is one-time download Pro-only (as listed) or also Free? | Plan gates in Phase 3 | Pro-only at paid launch. Optionally enabled for Free during beta. | Phase 3 | OPEN |
 | Q-009 | Read-only room links: Pro-only? | Abuse and complexity | Pro-only | Phase 4 | OPEN |
 | Q-010 | Executables/scripts in anonymous remote links: block or warn? | Malware distribution | Block until scanning (Phase 6) | Phase 2 | OPEN |
@@ -446,18 +452,19 @@ Status: `OPEN` · `ANSWERED` (record the answer and date, and update affected de
 | Q-016 | Primary markets/regions? | Supabase region, R2 location, legal scope | Decide before creating production projects | Phase 0 | OPEN |
 | Q-017 | Team retention: allow "no expiry" within quota? Maximum retention? | Storage liability | Allow no expiry within quota. Admins set a maximum. | Phase 5 | OPEN |
 | Q-018 | Branded share pages: logo/colours/name on our domain only, or custom domains? | Complexity | Logo/colours/name only. Custom domains later. | Phase 5 | OPEN |
-| Q-019 | Browser support baseline? | Next.js 16 minimums (Chrome/Edge/Firefox 111+, Safari 16.4+) | Accept Next.js 16 minimums | Phase 1 | OPEN |
+| Q-019 | Browser support baseline? | Next.js 16 minimums are Chrome/Edge/Firefox 111+ and Safari 16.4+, but Tailwind CSS 4 (DEC-035) compiles for Chrome 111, Safari 16.4 and **Firefox 128** | Accept **Chrome/Edge 111+, Firefox 128+, Safari 16.4+** | Phase 1 | OPEN — Phase 1 assumes the recommendation (Firefox corrected to 128+ on 2026-10-15, phase 1 §18.6) |
 | Q-020 | Product name and production and staging domains? | CORS, CSP, cookies, Turnstile, R2 CORS, email | Decide in Phase 0 | Phase 0 exit | OPEN |
-| Q-021 | Who may edit a text item: only its creator, or anyone who can see it? | Collaboration vs vandalism. Under DEC-031 "anyone who can see it" includes strangers on public Wi-Fi. | Local shares: **creator only**; everyone present can copy the text. Private and workspace rooms (Phase 4–5): any member. | Phase 1 | OPEN |
+| Q-021 | Who may edit a text item: only its creator, or anyone who can see it? | Collaboration vs vandalism. Under DEC-031 "anyone who can see it" includes strangers on public Wi-Fi. | Local shares: **creator only**; everyone present can copy the text. Private and workspace rooms (Phase 4–5): any member. | Phase 1 | OPEN — Phase 1 assumes the recommendation (phase 1 §17.2) |
 | Q-022 | Who handles abuse reports and legal requests, and who reviews ToS/Privacy/AUP? | Legal readiness | Named operator plus external legal review | Public beta | OPEN |
-| Q-023 | Do you accept that Phases 1–2 are internal/invite-only and public beta starts after Phase 3 and the launch gate? | Launch timing | Accept | Phase 1 | OPEN |
+| Q-023 | Do you accept that Phases 1–2 are internal/invite-only and public beta starts after Phase 3 and the launch gate? | Launch timing | Accept | Phase 1 | OPEN — Phase 1 assumes the recommendation (phase 1 §17.2) |
 | Q-024 | Keep the uncommitted pnpm 12.4.2 bump? | Build compatibility | Decide after SP-01 | Phase 0 | OPEN |
 | Q-025 | Are native (mobile/desktop) apps on the long-term roadmap? | The only way to identify the actual LAN (mDNS/Bonjour) instead of the public IP, which would remove RISK-001 for app users | Not now. Revisit after product-market fit. | — | OPEN |
 | Q-026 | Billing in Phase 4 (recommended) or Phase 6 (originally proposed)? | Paid launch timing | Phase 4 | Phase 4 | OPEN |
 | Q-027 | Should anonymous users be allowed to create remote links at all, or with tighter caps that a verified (free) account lifts? | Abuse vs "no account required" | Phase 2: allow anonymous links under the Free caps in [03 §10](03-security-and-network-design.md#10-rate-limiting-and-abuse-protection) (for example 500 download-URL issuances/day per link, executable block). Phase 4: a free, email-verified account may get higher caps. | Phase 2 | OPEN |
 | Q-028 | Should anyone be able to send a remote person a link or QR code to a **whole network's feed**? | It would show other people's local uploads to someone off the network | **No.** Remote links target one share (Free) or a Pro/Team private or workspace room. | Phase 2 | OPEN |
-| Q-029 | Large-network cap: switch local mode off above how many distinct devices per 24 h? | Too low breaks offices and cafés. Too high lets an undetected shared IP (campus, carrier NAT) group thousands of strangers. | **50**, configurable, tuned from SP-04 and production data. Fail closed (content hidden) while over the cap. | Phase 1 | OPEN |
-| Q-030 | Default expiry for local shares? | A shorter default limits exposure from IP reassignment (RISK-026) and forgotten posts on public Wi-Fi | **24 h default**, with 1 h / 24 h / 7 days selectable on Free (7 days stays the maximum) | Phase 1 | OPEN |
+| Q-029 | Large-network cap: switch local mode off above how many distinct devices per 24 h? | Too low breaks offices and cafés. Too high lets an undetected shared IP (campus, carrier NAT) group thousands of strangers. | **50**, configurable, tuned from SP-04 and production data. Fail closed (content hidden) while over the cap. | Phase 1 | OPEN — Phase 1 assumes the recommendation (phase 1 §17.2) |
+| Q-030 | Default expiry for local shares? | A shorter default limits exposure from IP reassignment (RISK-026) and forgotten posts on public Wi-Fi | **24 h default**, with 1 h / 24 h / 7 days selectable on Free (7 days stays the maximum) | Phase 1 | OPEN — Phase 1 assumes the recommendation (phase 1 §17.2) |
+| Q-031 | Supabase Auth keeps the client IP of each session and in its audit log (RISK-029). Accept and disclose, add a retention job, or time-box sessions? | Privacy: "no raw IPs" is true for the app's tables but not for the Supabase project | Disclose it in the privacy notice now; add a job in Phase 3 that removes anonymous sessions and audit entries older than 30 days once SP-03 confirms it is safe on hosted Supabase | Phase 1 (disclosure), Phase 3 (job) | OPEN — raised in phase 1 §18.5 |
 
 ---
 

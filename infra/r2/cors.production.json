@@ -3,7 +3,7 @@
     {
       "AllowedOrigins": ["https://app.example.invalid"],
       "AllowedMethods": ["PUT", "GET", "HEAD"],
-      "AllowedHeaders": ["content-type", "content-disposition", "cache-control"],
+      "AllowedHeaders": ["content-type", "content-disposition", "cache-control", "if-none-match"],
       "ExposeHeaders": ["ETag"],
       "MaxAgeSeconds": 3600
     }

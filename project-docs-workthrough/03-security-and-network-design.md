@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Document status | PROPOSED — awaiting owner review. §3 implements the owner's accepted rule for local mode (DEC-031, CR-001). |
-| Last updated | 2026-09-23 |
+| Last updated | 2026-10-15 (Phase 1 as built: §3.4–§3.5 fallback, §3.5 stale egress lists fail closed and the prefix-only egress lookup, §7.1 signed, write-once and recorded upload URLs, §7.3 stored-header and deadline checks, §7.7 deleting objects while upload URLs live, §13 IP inventory corrected, §8 bearer tokens, §10 limits, §11 CSP notes) |
 | Key decisions | DEC-031 (ACCEPTED), DEC-032, DEC-033, DEC-004, DEC-013, DEC-014, DEC-015, DEC-020, DEC-021, DEC-024, DEC-025 |
 | Key risks | RISK-001, RISK-002, RISK-004, RISK-005, RISK-007, RISK-008, RISK-009, RISK-013, RISK-025, RISK-026 |
 
@@ -129,7 +129,7 @@ The owner's rule (DEC-031, **ACCEPTED**):
 | P2 | **Visibility is evaluated per request, never remembered.** Local mode has no memberships. |
 | P3 | **Fail closed.** When the server cannot trust that an IP stands for one network, local mode is off there, for viewing and for posting. |
 | P4 | **Tell the uploader who can see it** before they post. |
-| P5 | **Minimal network data.** Keyed hashes only, short-lived presence, no raw IPs. |
+| P5 | **Minimal network data.** Keyed hashes only, short-lived presence, no raw IPs in the app's tables, query parameters or logs. |
 
 ### 3.2 Network key derivation (DEC-032)
 
@@ -186,7 +186,7 @@ Rules:
 
 **Placement:** a new local share goes into the uploader's **most specific** eligible space: the IPv6 /64 when present, otherwise the IPv4 address. Viewing covers every eligible space in the device's current network. A device with only IPv4, on a home where others use IPv6, therefore sees posts from other IPv4-only devices but may miss posts from IPv6 devices (a documented false negative, R5). This bias is deliberate: IPv4 addresses are far more often shared between unrelated homes.
 
-**Feasibility is unverified.** Cloudflare-proxied hostnames normally answer both A and AAAA records ("IPv6 compatibility"), so single-family probe hostnames may need a separate zone or configuration. **If SP-04 finds this infeasible:** only the current request's key counts. Dual-stack devices may then flip between spaces (reduced by HTTP connection reuse). SP-04 records the resulting false-negative rate (RISK-013), and CGNAT detection relies on the ASN and crowding signals only.
+**Phase 1 as built (2026-10-15): not adopted.** SP-04 has not run, so only the current request's key counts (phase 1 DV1-3); there is no probe endpoint and no binding table. normally answer both A and AAAA records ("IPv6 compatibility"), so single-family probe hostnames may need a separate zone or configuration. **If SP-04 finds this infeasible:** only the current request's key counts. Dual-stack devices may then flip between spaces (reduced by HTTP connection reuse). SP-04 records the resulting false-negative rate (RISK-013), and CGNAT detection relies on the ASN and crowding signals only.
 
 ### 3.5 Eligibility: classification and fail-closed guards (DEC-032)
 
@@ -196,14 +196,15 @@ Rules:
 | `shared_egress` | (a) Address in Apple's iCloud Private Relay egress list or the Tor exit list. (b) Client ASN on a curated list: VPN and hosting providers (both families), and **mobile carriers for IPv4 only**, because carriers put many subscribers behind one IPv4 address but usually give each phone its own IPv6 /64. (c) An IPv4 key bound to **two or more different IPv6 /64s within one hour**: a strong carrier-NAT signal (needs §3.4). | **Off** |
 | `too_large` | More than **50** distinct devices seen on the space in 24 h (tunable, Q-029). Catches shared IPs the lists miss (campus, enterprise NAT, residential CGNAT) and very large Wi-Fi networks. | **Off** |
 | `blocked` | Operator action or abuse response | **Off** |
-| `unavailable` | No trusted IP, or a non-global address | **Off** |
+| `unavailable` | No trusted IP, a non-global address, the kill switch, or (staging/production) missing or stale egress lists | **Off** |
 
 Rules:
 
 - **Fail closed for existing content too.** When a space leaves `ok`, its shares stop being visible to anyone on that network until it returns to `ok`. Creators still see them under "My uploads" and can share them by link. A space that becomes `too_large` or `shared_egress` stays so for at least 7 days.
 - Status copy: *"Local sharing is off on this network. It looks like a mobile, VPN, relay or very large shared network, where other people may share your internet address. Use a link, QR code or share code instead."*
 - **ASN data:** Cloudflare's rules engine knows the client's ASN. Whether a Transform Rule can forward it to the origin on the chosen Cloudflare plan is verified in SP-04 (Q-013). The ASN list must be licensed for commercial use. Without ASN data, Phase 1 relies on (a), (c) and `too_large`, and ASN classification arrives in Phase 6.
-- Someone on a network can inflate its device count to switch local mode off there. That denies convenience only, and is accepted.
+- **Phase 1 as built (2026-10-15):** (a) via `app.network_egress_ranges`, loaded with `pnpm egress:load` ([runbook](runbooks/egress-lists.md)), and `too_large`. The client address never reaches the database: the app asks for the ranges overlapping its IPv4 /24 or IPv6 /48 (`app.egress_ranges_overlapping`, which refuses longer prefixes), matches the exact address itself and passes only the result to `app.observe_network` (Phase 1 F1-13); no ASN list (needs SP-04) and no (c) (needs §3.4). The cap is the runtime flag `network_large_cap` (default 50, Q-029 assumed), shared by `observe` and the status job. Statuses are applied in `app.observe_network()` and `app.refresh_network_status()`; every change is audited and signalled as `network.changed`. That denies convenience only, and is accepted.
+- **Missing or stale egress lists fail closed (Phase 1 security review, M2):** in staging and production, local sharing is off everywhere (`unavailable`, reason `classification_unavailable`) while the lists were never loaded or the last load is older than 14 days (`lib/server/network/egress.ts`). Locally and in tests the lists are optional. A `shared_egress` space is lifted only by an observe after its sticky period, because only an observe knows the address to re-check; the status job never lifts it.
 - The crowding threshold rose from 12 (the rejected discovery-only design) to 50, because under DEC-031 an ordinary office or café Wi-Fi is meant to work.
 
 ### 3.6 Visibility rule and presence
@@ -231,7 +232,7 @@ visible(share) =
 ### 3.7 Posting to the network (DEC-033)
 
 - **Destination picker** in the composer: **This network** (the default when the status is `ok`) or **Link only** (Phase 2; never visible on any network). Pro/Team add private and workspace rooms (Phase 4–5).
-- **Audience line** before posting: *"Visible to everyone on this network · 3 devices here now."* A one-time notice explains that everyone connected to the same Wi-Fi, including guests, can see and download what is posted here.
+- **Audience line** before posting, under the composer: *"Visible to everyone on this network"*; the status bar shows *"This network · 3 devices here now"* (Phase 1 copy, owner decision 2026-10-15). A one-time notice explains that everyone connected to the same Wi-Fi, including guests, can see and download what is posted here.
 - Posting to the network is disabled when the status is not `ok`.
 - **Permissions:** anyone present can view, download, copy text and report. Only the creator can edit text, delete, and create or revoke links (Q-021).
 - **My uploads:** the creator sees all their shares from any network, and can create links there.
@@ -496,7 +497,8 @@ returning id, claim_grace_until;
 - Expiry choice, burn flag and link options against entitlements.
 - Declared MIME type and extension against the policy in §7.4.
 - Filename sanitization (§7.2).
-- Turnstile for anonymous users when risk rules trigger (for example, above N shares per day).
+- Turnstile for anonymous users when risk rules trigger (for example, above N shares per day). *(Not in Phase 1: Turnstile guards anonymous sign-in only.)*
+- **Signed PUT (Phase 1 as built).** Each file gets one presigned `PUT` (15 min, never beyond the upload deadline or the share's expiry; each expiry is recorded in `files.upload_url_expires_at` before the URL is handed out) that signs `Content-Type`, `Content-Disposition`, `Cache-Control`, **`Content-Length`** (storage refuses any other size, DV1-15) and **`If-None-Match: *`** (write-once: the object can't be replaced once it exists, DV1-18). Storage keeps headers the signature doesn't cover, so §7.3 checks them.
 
 ### 7.2 Filename sanitization
 
@@ -509,6 +511,8 @@ returning id, claim_grace_until;
 ### 7.3 At upload completion
 
 - `HeadObject` size must **equal** the declared size and be within limits. Otherwise the object is deleted and the file rejected.
+- The share must still be `pending_upload` and unexpired, and the upload deadline not passed, checked under lock with the database clock (Phase 1 F1-15).
+- The stored `Content-Type`, `Content-Disposition` and `Cache-Control` must equal the signed values, and there must be **no `Content-Encoding`** (a browser would decode it on download). Otherwise the object is deleted and the file rejected (`metadata_mismatch`; Phase 1 security review M1).
 - Ranged GET of the first 4,100 bytes for magic-byte detection. This sets `detected_mime` and `preview_kind`.
 - If the declared type is image but the bytes are not, the file is kept as a generic file with no preview.
 
@@ -533,6 +537,15 @@ Detection uses extension **and** magic bytes: PE/MZ, ELF, Mach-O, MSI/OLE, APK/J
 - Operator actions: block the share or link (`status = 'blocked'`, links revoked, objects deleted or quarantined as legal advice requires), block a whole network space (`network_spaces.status = 'blocked'`), audit, reporter follow-up.
 - **Legal obligations vary by jurisdiction.** For example, US providers must report apparent child sexual abuse material to NCMEC once aware (18 U.S.C. § 2258A). The EU Digital Services Act imposes notice-and-action duties. **Legal review is required before public launch** (RISK-005, Q-022). Hash-matching tools are evaluated in Phase 6.
 
+### 7.7 Deleting objects while upload URLs are live (Phase 1 as built)
+
+A presigned upload URL can't be revoked before it expires. If a deleted object's key were simply freed, its write-once URL could create the object again (Phase 1 F1-12). So:
+
+- Each URL's expiry is recorded (`files.upload_url_expires_at`) before the URL is handed out, and no URL outlives the upload deadline or the share's expiry.
+- Ending a share or rejecting a file queues its object in the outbox as before. When the executor claims it (`app.claim_object_deletions`) while a URL may still be live (its expiry plus 5 min of clock-skew grace), it **overwrites the object with an empty tombstone** instead of deleting it. The content is gone at once; the key stays taken, so storage refuses the URL (412). The tombstone is deleted when the hold ends.
+- Completion re-checks the share and the deadline under lock, so a deleted, failed or expired share never comes back.
+- Every executor (the Phase 1 request-time executor and sweep, the Phase 3 janitor) must follow this rule.
+
 ---
 
 ## 8. Authentication and session security
@@ -543,9 +556,9 @@ Detection uses extension **and** magic bytes: PE/MZ, ELF, Mach-O, MSI/OLE, APK/J
 | Accounts (Phase 4) | Email magic link and/or OAuth (Q-014). Optional TOTP MFA. MFA **required** for operator accounts. |
 | API keys | Publishable key in the browser. **Secret key only on the server and Edge Function.** Supabase rejects secret keys from browsers. Legacy `anon`/`service_role` keys disabled after setup (deprecated by end of 2026). |
 | JWT | Verified server-side on every request (JWKS / `getClaims`, confirmed in SP-03). Consider a 30-minute expiry (instead of 1 h) to shorten realtime revocation lag. |
-| Cookies | `@supabase/ssr` session cookies (Secure, SameSite=Lax), refreshed in `proxy.ts`. Link sessions: `__Host-link_session`, httpOnly. |
+| Session transport | **As built in Phase 1 (DV1-14):** the browser keeps its Supabase session and sends the access token as `Authorization: Bearer`; the server verifies it on every request and never refreshes it (no refresh-token rotation races; the header can't be sent cross-site). Planned originally: `@supabase/ssr` cookies refreshed in `proxy.ts`. Link sessions (Phase 2): `__Host-link_session`, httpOnly. |
 | Device binding | `X-Device-Id` must belong to `auth.uid()`. Revoked devices get 401 and the client resets. |
-| CSRF | Exact Origin allow-list on mutations, JSON-only bodies, SameSite cookies, no GET mutations |
+| CSRF | Exact Origin allow-list on mutations, JSON-only bodies (a body-less DELETE needs only the Origin), bearer header that other sites can't send, no GET mutations |
 | Anonymous → account | `linkIdentity`/`updateUser` keeps the user ID. Signing into an **existing** account runs a merge flow that requires the still-valid anonymous access token as proof (Phase 4, RISK-024). |
 | Operator tools | Phase 2–3: takedown SQL functions run only from the MFA-protected Supabase dashboard, each call writing an audit event. Phase 4+: optional web admin for allow-listed operator accounts with **required** MFA. Every action is audited. |
 
@@ -611,7 +624,7 @@ Initial values are proposals; tune them from production data. Implemented as `ap
 | Invite accept (Phase 4) | invite, network key | 10/10 min per invite · 30/h per network key | 429 |
 | Abuse report | network key | 10/h + Turnstile | 429 |
 
-**Kill switches** (`app.runtime_flags`, cached ≤ 30 s): `uploads_enabled`, `anonymous_uploads_enabled`, `local_sharing_enabled`, `remote_links_enabled`, `short_codes_enabled`. Also per-network blocks (`network_spaces.status = 'blocked'`) and per-user suspension (`app.user_flags`).
+**Phase 1 as built:** `lib/server/ratelimit/limits.ts` implements register device (10/h per user), rename (20/h), observe (30/min per device), local feed and My uploads (60/min per device), share detail (120/min per device), create share (30/h per user plus daily volume 2 GB per user and 10 GB per network space, counted in KiB), complete (120/min per user), text create/edit (60/min per user, 300/min per space), delete (60/min per user) and download/preview URLs (120/min per device). Every 429 carries `Retry-After`.: `uploads_enabled`, `anonymous_uploads_enabled`, `local_sharing_enabled`, `remote_links_enabled`, `short_codes_enabled`. Also per-network blocks (`network_spaces.status = 'blocked'`) and per-user suspension (`app.user_flags`).
 
 ---
 
@@ -652,7 +665,7 @@ Notes:
 
 - `{r2-s3-host}` must be the **exact** R2 S3 host used by presigned URLs, not `*.r2.cloudflarestorage.com`, which would allow any R2 account.
 - **`style-src-attr 'unsafe-inline'` (verified and adopted in Phase 0, 2026-09-29, DEC-035).** Radix UI server-renders inline `style` attributes, which nonces cannot cover. A production build with a Radix Progress bar showed the browser blocking the attribute (`style-src-attr` violation) and the bar drawing at the wrong width. The directive allows only `style=""` attributes: they cannot run script, `<style>` elements still need the nonce, and `script-src` is unchanged. Development builds already allow inline styles, so only production builds show the problem ([phase 0 F-7](phases/phase-0-foundation.md#182-findings-during-implementation)).
-- **No ad, analytics or tag-manager scripts** on app, room or share pages (DEC-024).
+- **Strict-CSP compatibility found in Phase 1 (F1-5):** zod 4 probes `new Function`, which the browser reports as a `script-src eval` violation even though zod catches it, so browser-side zod runs with `jitless`. Radix's scroll lock inserts a `<style>` tag; the root layout passes the request's nonce to `get-nonce` so the tag carries it. The multi-device E2E tests assert zero violations.
 
 ---
 
@@ -685,12 +698,12 @@ Rules:
 
 | Data | Retention | Notes |
 |---|---|---|
-| Raw IP addresses | **Not stored** | Used transiently to compute network keys |
+| Raw IP addresses | **Not stored by the app**, and never sent to the database: the egress-list lookup sends only the IPv4 /24 or IPv6 /48 around the address (Phase 1 F1-13, tested with full statement logging) | Used transiently in memory to compute network keys and match the egress lists. **Supabase Auth stores the client IP of each session (`auth.sessions.ip`) and in its audit log**, for as long as the session exists (Phase 1 F1-14, Q-031). Cloudflare and the host may log it per their settings (08 §4–§5). |
 | Network spaces (network key, status, device counts) | Until 30 days after the last active share or presence | Pseudonymous personal data, stated in the privacy policy |
 | Network presence | 10 min "present"; rows deleted 24 h after last seen | Needed for realtime authorization and the large-network cap |
 | Dual-stack bindings, probe nonces, IPv4↔IPv6 links | 10 min · 60 s · 7 days | CGNAT detection |
 | IP-derived HMACs in logs/audit | ≤ 7 days (security logs) | Rate-limit keys expire with their windows |
-| File bytes | Deleted when the share ends: target ≤ 15 min; backstop about 48 h (lifecycle) | — |
+| File bytes | Deleted when a share is deleted or a file rejected (tombstone first while an upload URL may be live, deleted ≤ 20 min later). After expiry: at the next storage sweep (Phase 1) or by the janitor (Phase 3). Backstop: lifecycle rule per class, 8 / 31 / 91 days | — |
 | Text content | **Nulled** in the same transaction that ends the share | — |
 | Share/file metadata tombstones | Free: 30 days after end (abuse handling). Pro/Team: per history retention (Q-015). | — |
 | Download log | Free: 30 days. Pro/Team: per plan. | — |

@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Document status | PROPOSED — numeric limits are proposals pending Q-006, Q-007, Q-008, Q-009, Q-015, Q-017 |
-| Last updated | 2026-09-23 (CR-001: local mode rows) |
+| Last updated | 2026-10-15 (Phase 1 enforces the Free rows; values still pending Q-007 and Q-030) |
 | Key decisions | DEC-018, DEC-019, DEC-023, DEC-024 |
 
 ---
@@ -11,6 +11,8 @@
 ## 1. Plan matrix (proposed)
 
 Values in *italics* are proposals that need owner confirmation.
+
+**Phase 1 (2026-10-15):** the Free column is enforced on the server from `lib/shared/plans.ts` (`lib/server/entitlements/plans.ts` resolves it; the UI uses the same numbers as hints): 100 MB per file, 20 files per share, 100 KB text, 2 GB active storage per user (reservation ledger), 2 GB/day per user and 10 GB/day per network (counted per network space), local expiry 1 h / 24 h / 7 days with 24 h default. The italic values are **assumed** until the owner answers Q-007 and Q-030; each is a one-line change.
 
 | Capability | FREE (anonymous, or signed in without subscription) | PRO | TEAM |
 |---|---|---|---|

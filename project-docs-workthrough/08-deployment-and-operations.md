@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Document status | PROPOSED — hosting choice is CONDITIONAL on SP-01 (DEC-022) |
-| Last updated | 2026-09-29 (database job verified locally; `app_server` search_path check). Earlier: 2026-09-23 (CR-001; Phase 0 implementation: `APP_ENV`, boot exit, CI workflow) |
+| Last updated | 2026-10-15 (Phase 1: local stack with RustFS, configuration inventory, CI stack job, Turnstile secret in Supabase; security review: Pseudo IPv4, query-parameter logging, egress-list loading and alert, `if-none-match` in CORS, egress runbook; second review pass: no client address in database parameters, `auto_explain`, Supabase Auth IP storage, access logs, WebKit in CI, manual verification procedure). Earlier: 2026-09-29; 2026-09-23. |
 | Key decisions | DEC-004, DEC-017, DEC-022, DEC-028, DEC-029, DEC-030 |
 
 ---
@@ -74,12 +74,12 @@ flowchart LR
 
 | Aspect | Local | Staging | Production |
 |---|---|---|---|
-| Web | `next dev` | Separate app or container at `staging.{domain}`, **behind Cloudflare Access** | `app.{domain}` (or apex) |
-| Supabase | CLI local stack (Docker), with Mailpit for auth emails | Separate project. Free plan is acceptable but pauses after 1 week inactive, so keep it active or use Pro. | **Pro** plan project in the region chosen by Q-016 |
-| R2 | Real dev bucket (scoped token), or MinIO for offline tests | `{product}-files-staging` | `{product}-files-prod` |
+| Web | `next dev` (or `next start` with `NODE_ENV=test` for tests) | Separate app or container at `staging.{domain}`, **behind Cloudflare Access** | `app.{domain}` (or apex) |
+| Supabase | CLI local stack (Docker): `pnpm stack:start` runs Postgres, Auth, Realtime, the API gateway and PostgREST (Studio, Storage, Edge Runtime, logging, pooler and Mailpit excluded until needed) | Separate project. Free plan is acceptable but pauses after 1 week inactive, so keep it active or use Pro. | **Pro** plan project in the region chosen by Q-016 |
+| R2 | **RustFS 1.0.1** (S3-compatible, container `local-saver-s3`, started by `pnpm stack:start`; phase 1 DV1-4) or a real dev bucket | `{product}-files-staging` | `{product}-files-prod` |
 | Cloudflare | Not used. Test client-IP override allowed (non-production only). | Proxied + Access + Turnstile (staging keys) | Proxied + WAF + rate limiting + Turnstile (production keys) |
 | Billing (Phase 4) | Provider sandbox | Sandbox | Live |
-| Data | Seed script | Synthetic only | Real |
+| Data | `supabase/seed.sql` (local `app_server` login); tests create their own data on random networks | Synthetic only | Real |
 
 ---
 
@@ -90,6 +90,8 @@ flowchart LR
 - [ ] **Request Header Transform Rule:** set static `X-Origin-Auth: <secret>` on all requests to app hostnames. Rotation procedure documented (two accepted values). Under DEC-031 this rule protects who sees local content: changes to it need review.
 - [ ] (If SP-04 adopts them) `v4.` and `v6.` probe hostnames that each answer in only one address family, configured as the SP-04 report specifies.
 - [ ] (If SP-04 confirms it works on the chosen plan) a Transform Rule forwarding the client ASN to the origin in a header that `proxy.ts` accepts only together with a valid `X-Origin-Auth`.
+- [ ] **Access logs:** know what the host and Cloudflare log about clients (`CF-Connecting-IP`), and set the shortest retention that still serves security investigations (phase 1 §18.5.2).
+- [ ] **Pseudo IPv4 off** (or "Add header" only, never "Overwrite headers"). Overwriting replaces the visitor's IPv6 address in `CF-Connecting-IP` with a reserved IPv4 address, which the app treats as non-global, so local sharing would be `unavailable` for every IPv6 visitor (Phase 1 security review).
 - [ ] Cache rules: cache only `/_next/static/*` and hashed public assets. **Bypass** `/api/*`, `/s/*`, `/j/*`, `/c*`, `/rooms/*` and all HTML.
 - [ ] Rate limiting rule on `/api/` with a **generous per-IP threshold**, because many users share IPs behind CGNAT. Application limits are the precise layer.
 - [ ] Custom WAF rules: allow only expected methods per path prefix. Exempt the billing webhook path from bot challenges.
@@ -108,7 +110,7 @@ flowchart LR
 - [ ] Data API: exposed schemas exclude `app`. Consider disabling the Data API if nothing uses it (verify Auth and Realtime are unaffected in SP-03).
 - [ ] Auth:
   - [ ] Anonymous sign-ins enabled.
-  - [ ] **CAPTCHA (Turnstile) enabled.**
+  - [ ] **CAPTCHA (Turnstile) enabled**, with the Turnstile **secret** key set here (Supabase verifies the token at anonymous sign-in; the app only has the site key).
   - [ ] JWT expiry reviewed (consider 30 min).
   - [ ] Site URL and redirect allow-list set.
   - [ ] Rate limits reviewed (anonymous sign-ins default 30/h per IP).
@@ -119,6 +121,9 @@ flowchart LR
   - [ ] After enabling login for `app_server`, confirm as that role: `show search_path` includes `extensions`, and `select 'A'::citext = 'a'` returns true (phase 0 F-9).
   - [ ] Network restrictions to the host's egress IPs where static (VPS).
   - [ ] Extensions: `pg_cron`, `pg_net`, `citext`. Vault secret for the janitor trigger.
+  - [ ] **Query logging.** Since phase 1 F1-13 the app sends no client address to the database (only a keyed hash and, for the egress lookup, an IPv4 /24 or IPv6 /48), verified with full statement logging locally. Still confirm the hosted settings, because parameters of logged statements are recorded in full by default: `log_statement` (`none` or `ddl`), `log_min_duration_statement` (off unless needed), `auto_explain.log_min_duration` (the Supabase image loads `auto_explain` at 10 s with `log_parameter_max_length = -1`), pgaudit (`pgaudit.log_parameter = off`), and the Log Explorer retention.
+  - [ ] **Supabase Auth IP storage (Q-031, RISK-029).** Auth records the client IP of each session (`auth.sessions.ip`) and in its audit log. Apply the owner's decision: privacy notice wording, session time-boxing, or a retention job.
+- [ ] **Egress lists loaded before the environment opens**, then at least weekly: `pnpm egress:load` ([runbook](runbooks/egress-lists.md)). Without a load in the last 14 days, local sharing is off everywhere (03 §3.5).
 - [ ] Edge Function `storage-janitor`: `verify_jwt` disabled **only** because the function checks its own trigger secret. Separate R2 token and database role. Secrets set per environment.
 - [ ] Backups: daily backups (7 days on Pro). **Point-in-time recovery evaluated before paid launch.** Restore drill on staging before public beta.
 
@@ -128,7 +133,7 @@ flowchart LR
 
 - [ ] One bucket per environment. Location hint per Q-016.
 - [ ] Public access **off**. `r2.dev` **off**. No custom domain.
-- [ ] CORS per environment: exact app origins; `PUT`, `GET`, `HEAD`; headers `content-type`, `content-disposition`, `cache-control`; expose `ETag`; max age 3600 s.
+- [ ] CORS per environment: exact app origins; `PUT`, `GET`, `HEAD`; headers `content-type`, `content-disposition`, `cache-control`, `if-none-match` (write-once uploads, DV1-18); expose `ETag`; max age 3600 s.
 - [ ] Lifecycle rules: `d7/` 8 days, `d30/` 31 days, `d90/` 91 days, abort incomplete multipart uploads after 1 day, no rule for `ws/`.
 - [ ] API tokens: `web-app` and `janitor` (Object Read & Write, scoped to the bucket). No admin tokens in runtime environments.
 - [ ] Usage notifications (storage growth, operations).
@@ -155,13 +160,12 @@ flowchart LR
 | `release.yml` | Manual dispatch or `v*` tag, **environment approval required** | `supabase db push` (production) → functions deploy → fast-forward `deploy/production` → production smoke tests |
 | `nightly.yml` | Schedule | Full e2e, real-R2 contract tests against the staging bucket, dependency update PRs (Renovate/Dependabot) |
 
-**Phase 0 implementation (`.github/workflows/ci.yml`):** three jobs.
+**As implemented (`.github/workflows/ci.yml`, Phase 1 update 2026-10-15):** two jobs.
 
-- `checks`: install (frozen lockfile), typecheck, lint, Vitest with coverage, `pnpm audit --audit-level high`.
-- `database`: `supabase db start` (applies migrations), `supabase test db` (pgTAP), and a check that `lib/server/db/types.gen.ts` matches the migrated schema.
-- `e2e`: `pnpm build`, Playwright Chromium, `pnpm test:e2e` (two `next start` servers: open mode and origin-locked mode).
+- `checks`: install (frozen lockfile, which pnpm checks against its supply-chain policy), typecheck (with Next.js route type generation), lint, Vitest unit and component tests with coverage, `pnpm audit --audit-level high` (one reviewed exception, phase 1 F1-6).
+- `stack`: `pnpm stack:start` (Supabase and RustFS; applies migrations and seed), `supabase test db` (pgTAP), generated-types drift check, `pnpm build`, `pnpm test:integration` (Vitest against `next start` on port 3200), `pnpm test:e2e` (open, origin-locked and full-stack servers).
 
-Integration tests with MinIO arrive with the code that needs them (Phase 1). All three jobs' commands pass locally (2026-09-29), including the database job: `supabase db start`, 28 pgTAP assertions, and regenerated types identical to the committed file. The workflow itself has not run yet: the GitHub remote doesn't exist (AC-0.1). Actions are referenced by major version tag; pin them to commit SHAs when the repository goes public.
+Every command of both jobs passes locally (2026-10-15). The workflow itself has not run yet: the GitHub remote doesn't exist (AC-0.1). Actions are referenced by major version tag; pin them to commit SHAs when the repository goes public.
 
 **Migrations are forward-only.** Expand/contract discipline keeps the previous app version working with the new schema, so rolling back the app means re-pointing the deploy branch to the previous commit.
 
@@ -181,6 +185,7 @@ Integration tests with MinIO arrive with the code that needs them (Phase 1). All
 | Origin-lock rejections | Logs | > 100 per 5 min |
 | Network `unavailable` rate | Logs | > 5% of observations (proxy misconfiguration) |
 | Network status flips | `network.status_changed` audit events | Spike in spaces becoming `shared_egress` or `too_large` (classification drift or abuse) |
+| Egress lists stale | `network.egress_list_stale` error log (local sharing is off everywhere) | Any; reload per the [runbook](runbooks/egress-lists.md) |
 | Abuse reports | `abuse_reports` | Every new report |
 | Supabase usage | Supabase dashboard alerts | 80% of MAU, Realtime connections, disk |
 | R2 storage | Cloudflare notifications / daily job | > 20% week-over-week growth |
@@ -201,6 +206,8 @@ Integration tests with MinIO arrive with the code that needs them (Phase 1). All
 | `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` | Publishable key |
 | `NEXT_PUBLIC_TURNSTILE_SITE_KEY` | Turnstile widget |
 
+Phase 1 reads these on the server at request time and the root layout passes them to the client (DV1-8), so one build serves every environment.
+
 ### 9.2 Server-only
 
 | Variable | Purpose |
@@ -209,14 +216,16 @@ Integration tests with MinIO arrive with the code that needs them (Phase 1). All
 | `APP_ALLOWED_ORIGINS` | Origin allow-list for CSRF checks |
 | `TRUST_PROXY_MODE` | `cloudflare` in staging and production, `none` locally |
 | `ORIGIN_SHARED_SECRET`, `ORIGIN_SHARED_SECRET_PREVIOUS` | Origin lock |
-| `ALLOW_TEST_CLIENT_IP` | Tests only. **The production boot refuses to start if set.** |
+| `ALLOW_TEST_CLIENT_IP` | Tests only. **The production boot refuses to start if set**, and also refuses it with `TRUST_PROXY_MODE=cloudflare`. It takes effect only when `APP_ENV` is set explicitly to `local` or `test`. |
 | `DATABASE_URL` | `app_server` through the Supavisor pooler |
 | `SUPABASE_SECRET_KEY` | Auth admin operations |
 | `R2_ACCOUNT_ID`, `R2_BUCKET`, `R2_S3_ENDPOINT`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` | Storage |
 | `NETWORK_KEY_SECRET_CURRENT`, `NETWORK_KEY_SECRET_PREVIOUS`, `NETWORK_KEY_VERSION` | Network keys (DEC-032) |
-| `NETWORK_LARGE_CAP` (default 50), `NETWORK_IPV6_PREFIX_LEN` (default 64), `NETWORK_PROBE_HOSTS` (only if the dual-stack probe is adopted) | Local-mode tuning |
+| `NETWORK_IPV6_PREFIX_LEN` (default 64) | Local-mode tuning. The large-network cap moved to the runtime flag `network_large_cap` (DV1-5); `NETWORK_PROBE_HOSTS` is not used (no dual-stack probe). |
 | `LINK_PEPPER`, `CODE_PEPPER`, `INVITE_PEPPER`, `PEPPER_VERSION` | Secret hashing |
-| `TURNSTILE_SECRET_KEY` | Turnstile verification |
+| `TURNSTILE_SECRET_KEY` | Not used by the app in Phase 1: set in the Supabase project's Auth captcha settings, which verify the token. |
+| `TEST_CLIENT_IP_DEFAULT` | Tests and local development only (with `ALLOW_TEST_CLIENT_IP=1`): client IP assumed without `X-Test-Client-IP`. Refused like the override. |
+| `RUNTIME_FLAGS_CACHE_SECONDS` | Kill-switch cache, default 30, at most 300 (tests use 0) |
 | `LOG_LEVEL` | Logging |
 | `SENTRY_DSN` (Phase 6) | Error monitoring |
 | `BILLING_*` (Phase 4) | Billing provider credentials and webhook secret |
@@ -246,6 +255,7 @@ All variables are validated with zod at boot (`lib/server/env.ts`, called from `
 
 | Runbook | Phase |
 |---|---|
+| [Shared-egress lists](runbooks/egress-lists.md) (written) | 1 |
 | Abuse report triage and takedown | 2 |
 | Kill switch usage | 2 |
 | Janitor backlog / failed deletions | 3 |

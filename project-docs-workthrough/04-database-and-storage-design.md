@@ -2,8 +2,8 @@
 
 | Field | Value |
 |---|---|
-| Document status | PROPOSED — no migrations have been written. Column-level detail is indicative and will be finalized in each phase's migration review. |
-| Last updated | 2026-09-29 (§12: baseline executed locally; `app_server` extensions access). Earlier: 2026-09-23 (CR-001: network spaces replace nearby rooms and admission tables) |
+| Document status | PROPOSED. Phase 0 and Phase 1 migrations are implemented (§12); later phases' column-level detail is indicative and finalized in each phase's migration review. |
+| Last updated | 2026-10-15 (§12: Phase 1 migration implemented; second review pass: §7.2 upload URL expiry, §9.2 storage executor and tombstones, §11 functions, §12 as-built list). Earlier: 2026-09-29 (baseline executed locally); 2026-09-23 (CR-001) |
 | Key decisions | DEC-006, DEC-007, DEC-009, DEC-010, DEC-012, DEC-016, DEC-017, DEC-019, DEC-026, DEC-027, DEC-031, DEC-032 |
 
 ---
@@ -147,7 +147,7 @@ Local mode has no rooms, owners or members. A **network space** stands for one n
 
 | Table | Key fields | Notes |
 |---|---|---|
-| `app.network_egress_ranges` | `cidr cidr`, `source CHECK (private_relay, tor, vpn, hosting)`, `updated_at`. GiST index (`inet_ops`) for containment lookups. | Phase 1: iCloud Private Relay (Apple publishes the CSV) and the Tor exit list. Refreshed daily. |
+| `app.network_egress_ranges` | `cidr cidr`, `source CHECK (private_relay, tor, vpn, hosting)`, `updated_at`. GiST index (`inet_ops`) for overlap lookups. | Phase 1: iCloud Private Relay (Apple publishes the CSV) and the Tor exit list, loaded by `pnpm egress:load` with adjacent ranges merged (about 14,700 rows); weekly by runbook in Phase 1, daily job from Phase 3. Queried only through `app.egress_ranges_overlapping(prefix)` (§11). |
 | `app.network_egress_asns` | `asn int PK`, `category CHECK (vpn, hosting, mobile_carrier)`, `families smallint[]` (mobile carriers: `{4}` only), `source`, `updated_at` | Phase 1 only if SP-04 confirms Cloudflare can forward the client ASN; otherwise Phase 6. The list source must be licensed for commercial use. |
 
 ---
@@ -375,6 +375,8 @@ for each row execute function app.emit_share_changed();
 | `multipart_upload_id`, `part_size_bytes` | text, int | Phase 4 |
 | `upload_status` | text CHECK (`pending`, `verified`, `rejected`, `deleted`) | |
 | `upload_expires_at` | timestamptz | Completion deadline (single: +2 h; multipart: +24 h) |
+| `upload_url_expires_at` | timestamptz null | Latest expiry of any presigned PUT issued for the file, recorded before the URL is handed out; URLs never outlive `upload_expires_at` or the share. Storage deletion holds the key until then ([03 §7.7](03-security-and-network-design.md#77-deleting-objects-while-upload-urls-are-live-phase-1-as-built)). |
+| `position` | smallint | Order the uploader listed the files in (Phase 1 DV1-17) |
 | `rejection_reason` | text null | |
 | `preview_kind` | text CHECK (`image`, `none`) | Raster images only |
 | `risk_flags` | text[] | `executable`, `script`, `archive`, `double_extension`, `disk_image` |
@@ -596,7 +598,7 @@ returning bytes_committed, bytes_reserved;
 | `refresh-egress-ranges` | daily | Edge Function | Load Apple Private Relay ranges and the Tor exit list (and the ASN list when adopted) | 1 (manual load) → 3 (scheduled) |
 | `cron-heartbeat` | every 5 min | pg_cron SQL | Update `app.runtime_flags('cron_heartbeat')`. `/api/v1/health/cron` exposes staleness to the uptime monitor. | 3 |
 
-Phase 1 relies on the R2 lifecycle backstop to delete objects of expired shares. The outbox table exists from Phase 1 and user-initiated deletes are written to it. Phase 1 executes those deletes synchronously with a best-effort call; Phase 3's janitor makes execution durable and prompt.
+**Storage executor (Phase 1 as built).** Every object deletion goes through the outbox. `app.claim_object_deletions(share_id, limit)` claims due rows for two minutes and says, per row, whether an upload URL may still be live (its recorded expiry plus 5 min of clock-skew grace). Live: the executor overwrites the object with an empty tombstone and reschedules the row for the end of the hold; otherwise it deletes the object and completes the row ([03 §7.7](03-security-and-network-design.md#77-deleting-objects-while-upload-urls-are-live-phase-1-as-built)). Phase 1 runs the executor right after a delete or rejection for that share, then sweeps up to 10 due rows of any share after the response, which also removes objects of shares the jobs ended. Phase 3's janitor makes execution durable and prompt and **must keep the tombstone rule**. The R2 lifecycle rules stay the backstop.
 
 ### 9.3 Expiry timeline (normal share)
 
@@ -653,7 +655,7 @@ Phase 1 relies on the R2 lifecycle backstop to delete objects of expired shares.
 
 | Table | Key fields | Expiry |
 |---|---|---|
-| `object_deletions` | `id bigint`, `bucket`, `object_key`, `multipart_upload_id null`, `reason`, `source_file_id`, `requested_at`, `not_before`, `attempts`, `locked_until`, `last_error`, `completed_at`. Unique partial `(bucket, object_key) WHERE completed_at IS NULL`. | Completed rows deleted after 30 days |
+| `object_deletions` | `id bigint`, `bucket`, `object_key`, `multipart_upload_id null`, `reason`, `source_file_id`, `requested_at`, `not_before`, `attempts`, `locked_until`, `last_error`, `tombstoned_at`, `completed_at`. Unique partial `(bucket, object_key) WHERE completed_at IS NULL`. Phase 1 has no `bucket` column (one bucket per environment). | Completed rows deleted after 30 days |
 | `audit_events` | `id bigint`, `occurred_at`, `actor_kind`, `actor_user_id`, `actor_device_id`, `workspace_id`, `network_space_id`, `room_id`, `action`, `target_type`, `target_id`, `metadata jsonb` (no secrets), `ip_hmac null`, `retention_until` | By `retention_until` (security ≥ 90 days; plan-based). Partition monthly when volume requires. |
 | `abuse_reports` | `id`, `link_id`, `share_id`, `network_space_id`, `room_id`, `category`, `details (≤ 2,000)`, `reporter_email`, `reporter_user_id`, `reporter_network_key`, `status`, `created_at`, `resolved_at`, `resolved_by_user_id`, `action_taken`, `evidence_retained_until` | Per legal advice |
 | `runtime_flags` | `key PK`, `enabled`, `value jsonb`, `updated_at`, `updated_by`, `note` | — |
@@ -671,7 +673,9 @@ Phase 1 relies on the R2 lifecycle backstop to delete objects of expired shares.
 | `app.end_share(share_id, reason)` | The single path to end content (§9.1) | Idempotent (no-op if already ended) |
 | `app.claim_burn_share(share_id, claimant…, grace)` | Burn claim ([03 §5.3](03-security-and-network-design.md#53-atomic-claim)) | Exactly-one winner |
 | `app.rate_limit_hit(key, limit, window)` | Fixed-window counter using `date_bin` + upsert | Atomic upsert |
-| `app.observe_network(device_id, user_id, keys, asn)` | Upsert spaces, classify, record presence (ending presence on other spaces), record dual-stack links. Returns space IDs and statuses. | One transaction. Upserts keyed on unique constraints. |
+| `app.observe_network(device_id, user_id, keys, asn)` | Upsert spaces, classify, record presence (ending presence on other spaces), record dual-stack links. Returns space IDs and statuses. **Phase 1 as built:** `(device_id, user_id, network_key, key_version, family, egress_source)`: the app passes the result of its egress lookup, never the address. | One transaction. Upserts keyed on unique constraints. |
+| `app.egress_ranges_overlapping(prefix)` (Phase 1) | Egress ranges overlapping an IPv4 /24 or IPv6 /48; refuses longer prefixes, so the client address never reaches the database | Read-only |
+| `app.claim_object_deletions(share_id, limit)` (Phase 1) | Claim due storage deletions and tell the executor whether to tombstone (§9.2) | `FOR UPDATE SKIP LOCKED`, `locked_until` |
 | `app.refresh_network_status(batch)` | Status job body (`too_large`, CGNAT links, sticky expiry) | `FOR UPDATE SKIP LOCKED` batches |
 | `app.add_room_member(room_id, user_id, via, invited_by)` (Phase 4) | Insert membership from an invite, audit | Unique PK prevents duplicates |
 | `app.expire_due_shares(batch)`, `app.finalize_claims(batch)`, `app.fail_stale_uploads(batch)`, `app.purge_ephemeral()`, `app.purge_tombstones(batch)` | Job bodies | `FOR UPDATE SKIP LOCKED` batches |
@@ -686,7 +690,15 @@ Phase 1 relies on the R2 lifecycle backstop to delete objects of expired shares.
 - **Types:** typed query layer generated from the migrated local database (Kysely codegen, DEC-007). Generated types are committed, and CI fails on drift.
 - **Promotion:** CI applies migrations to an ephemeral local database. Merges to `main` apply to **staging** automatically. **Production** requires manual approval and runs **before** the app deploy that depends on it.
 - **Phase 0 baseline (implemented):** `supabase/migrations/20260923132452_baseline.sql` creates `app` and `app_realtime` (owned by `app_owner`), the roles `app_owner` and `app_server` (both `NOLOGIN` in the migration; an operator enables login for `app_server` and sets its password per environment), `citext`, `pg_cron`, `pg_net`, `app.runtime_flags`, `app.rate_counters` and `app.rate_limit_hit()`. The migration grants `app_owner` to the migration role so it can create objects owned by `app_owner`. `app_server` gets USAGE on `extensions` and the role setting `search_path = "$user", public, extensions`; without both, `citext` columns silently compare case-sensitively for the server ([phase 0 F-9](phases/phase-0-foundation.md#182-findings-during-implementation)). pgTAP tests: `supabase/tests/baseline.test.sql` (28 assertions, passing locally on 2026-09-29). Generated types: `lib/server/db/types.gen.ts`. Local Supabase Storage is disabled in `supabase/config.toml` (files live in R2). The baseline was corrected on 2026-09-29 before any hosted environment applied it; from the first staging apply onward it is never edited.
-- **Proposed migration sequence:**
+- **Phase 1 (implemented 2026-10-15):** `supabase/migrations/20261015120000_phase1_local_sharing.sql`, tested by `supabase/tests/phase1_local_sharing.test.sql` (106 assertions). It has only been applied to local databases and was revised in place during Phase 1 review; from the first staging apply onward it is never edited. As built, compared with §3–§11:
+  - No dual-stack tables (`network_probe_nonces`, `network_bindings`, `network_key_links`) and no `network_egress_asns`: SP-04 has not run (phase 1 DV1-3).
+  - `network_spaces` carries `status`, `status_reason`, a 7-day sticky `status_until` and `devices_24h`. `app.observe_network` takes the app's egress lookup result; `app.egress_ranges_overlapping` serves that lookup by coarse prefix; no function takes a client address (pgTAP). `app.rekey_network_space` moves a space to the current key version.
+  - The large-network cap is the runtime flag `network_large_cap`; the flag `egress_ranges` records when the lists were loaded (staging and production fail closed when it is missing or older than 14 days).
+  - `files` adds `position` and `upload_url_expires_at`; `object_deletions` has no `bucket` column (one bucket per environment) and adds `tombstoned_at`; `app.claim_object_deletions` drives the storage executor (§9.2).
+  - `shares.scope` allows only `network`.
+  - Tables that reference `auth.users` are created by the migration role and handed to `app_owner`; Realtime trigger functions are `SECURITY DEFINER` and owned by the migration role; execute on `app` functions is revoked from `PUBLIC` globally (phase 1 F1-1 … F1-3).
+  - The Supabase CLI (2.117) splits a migration wrongly at `case … end then` inside a PL/pgSQL `if`; such conditions are written without `case` (phase 1 F1-16).
+
 
 | Phase | Migrations |
 |---|---|

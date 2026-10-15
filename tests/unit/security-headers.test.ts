@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { API_CSP, buildDocumentCsp, generateNonce, securityHeaders } from "@/lib/server/security/headers";
+import { API_CSP, buildDocumentCsp, generateNonce, isAssetPath, securityHeaders } from "@/lib/server/security/headers";
 
 function directives(csp: string) {
   return Object.fromEntries(
@@ -66,6 +66,20 @@ describe("buildDocumentCsp", () => {
     expect(d["script-src"]).toContain("https://challenges.cloudflare.com");
     expect(d["frame-src"]).toEqual(["https://challenges.cloudflare.com"]);
     expect(directives(buildDocumentCsp(base))["frame-src"]).toBeUndefined();
+  });
+});
+
+describe("isAssetPath", () => {
+  it("skips the document CSP only for build assets and known public files", () => {
+    expect(isAssetPath("/_next/static/chunks/a.js")).toBe(true);
+    expect(isAssetPath("/favicon.ico")).toBe(true);
+    expect(isAssetPath("/robots.txt")).toBe(true);
+  });
+
+  it("keeps the CSP on any other path, even one that looks like a file (it may render a page)", () => {
+    expect(isAssetPath("/uploads.x")).toBe(false);
+    expect(isAssetPath("/anything/evil.html")).toBe(false);
+    expect(isAssetPath("/")).toBe(false);
   });
 });
 

@@ -11,10 +11,17 @@ export class ApiError extends Error {
     readonly code: string,
     message: string,
     readonly details?: unknown,
+    /** Extra response headers, for example Retry-After on 429. */
+    readonly headers?: Record<string, string>,
   ) {
     super(message);
     this.name = "ApiError";
   }
+}
+
+/** The one body for "doesn't exist" and "not yours" (03 §4.9): reveals nothing. */
+export function notFound(): ApiError {
+  return new ApiError(404, "NOT_FOUND", "Not found");
 }
 
 export type ErrorBody = {

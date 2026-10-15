@@ -5,7 +5,7 @@
 | Document status | DRAFT — awaiting owner review |
 | Last updated | 2026-09-23 (CR-001: owner kept automatic same-network visibility) |
 | Baseline commit | `be78415` "Initial commit from Create Next App" (plus an uncommitted pnpm version bump) |
-| Implementation authorized? | **Phase 0 only** (owner, 2026-09-23). Phase 0 is BLOCKED on owner items (in-repo work done and verified locally, 2026-09-29); see [phase 0 §18](phases/phase-0-foundation.md#18-implementation-status). |
+| Implementation authorized? | Phase 0 (owner, 2026-09-23) and **Phase 1** (owner, 2026-10-15). Phase 0 is BLOCKED on owner items; Phase 1 is implemented and NEEDS REVIEW ([phase 1 §18](phases/phase-1-local-sharing.md#18-implementation-record-2026-10-15)). Phase 2 is not authorized. |
 
 ---
 
@@ -40,7 +40,7 @@ A web SaaS for moving **text, images, documents and other files** between device
    - **The server decides the network on every request**, from a client IP only Cloudflare can set. Clients can't choose or fake a network (DEC-004, DEC-032).
    - **Nothing is remembered.** Leave the Wi-Fi and the network's posts disappear on the next request. Your own posts stay under "My uploads".
    - **Fail closed where one IP may cover several networks.** Local mode switches itself off on relay, VPN, mobile-carrier and very large networks, where the server cannot tell networks apart. Users there share by link, QR code or code.
-   - **Uploaders see their audience** before posting: *"Visible to everyone on this network · 3 devices here now"*. Only the creator can delete a post or create a link to it.
+   - **Uploaders see their audience** before posting: *"Visible to everyone on this network"* under the composer, and *"This network · 3 devices here now"* in the status bar. Only the creator can delete a post or create a link to it.
 
    **What remains, by the nature of the rule:**
    - everyone on the same Wi-Fi (guests, café customers, co-workers) sees local posts (RISK-025);

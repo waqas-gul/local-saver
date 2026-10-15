@@ -69,7 +69,7 @@ The same-network wording stays as the owner wrote it (CR-001). Only the in-app a
 | Current | Suggested |
 |---|---|
 | "Same network → Auto access" | Keep |
-| "Users on the same network automatically see shared uploads" | Keep. In the app, before posting: *"Visible to everyone on this network · 3 devices here now."* |
+| "Users on the same network automatically see shared uploads" | Keep. In the app, before posting: *"Visible to everyone on this network"* (with *"This network · 3 devices here now"* in the status bar). |
 | "No QR or link needed" | Keep |
 | "Other networks cannot auto-browse local content" | Keep. Where local mode is off: *"Local sharing is off on this network. Use a link, QR code or share code instead."* |
 | "Protected Access" | "Private link · optional password · expires automatically" |

@@ -77,9 +77,15 @@ export function isApiPath(pathname: string): boolean {
   return pathname === "/api" || pathname.startsWith("/api/");
 }
 
-/** Static assets and files served by Next.js: no document CSP needed. */
+/** Files that are never HTML: build assets and the app's metadata files. */
+const PUBLIC_FILES = new Set(["/favicon.ico", "/robots.txt"]);
+
+/**
+ * Static assets that need no document CSP. Anything else keeps it, even a path that looks
+ * like a file, because it may render a page (for example the 404 page).
+ */
 export function isAssetPath(pathname: string): boolean {
-  return pathname.startsWith("/_next/") || /\.[a-z0-9]+$/i.test(pathname.split("/").pop() ?? "");
+  return pathname.startsWith("/_next/") || PUBLIC_FILES.has(pathname);
 }
 
 export function securityHeaders(pathname: string, options: { https: boolean }): Record<string, string> {
