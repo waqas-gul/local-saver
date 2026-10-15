@@ -1,8 +1,8 @@
 import "server-only";
 
 /**
- * Phase 0 logging skeleton (DEC-029): one JSON line per event, with redaction.
- * Redaction rules follow 03 §14. A full logger (pino) replaces the writer in Phase 1.
+ * Application logger (DEC-029): one JSON line per event, with redaction.
+ * Redaction rules follow 03 §14. Kept instead of pino (phase 0 DV-7, phase 1 DV1-7).
  */
 
 type Level = "debug" | "info" | "warn" | "error";

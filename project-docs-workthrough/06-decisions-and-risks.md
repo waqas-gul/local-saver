@@ -280,6 +280,7 @@ Approved by:
 ### DEC-029 — Observability and redaction
 
 - **Decision:** error monitoring (Sentry or equivalent) scrubbing URLs, fragments, cookies and tokens. Structured JSON logs (pino) with redaction. Uptime and cron-heartbeat monitoring. Alert catalogue in [08](08-deployment-and-operations.md#8-observability-and-alerting).
+- **As built (Phases 0–1, 2026-10-15):** logs use the internal JSON logger with redaction (`lib/server/log.ts`) instead of pino (phase 0 DV-7, phase 1 DV1-7). Error monitoring and uptime and cron-heartbeat monitoring are not built yet.
 - **Status:** PROPOSED
 
 ### DEC-030 — Runtime and package manager

@@ -88,7 +88,7 @@ flowchart LR
   end
   CF["Cloudflare edge<br/>DNS · TLS · WAF · rate limit · Turnstile<br/>adds origin secret header"]
   subgraph WEB["Web host (Hostinger, conditional) — Next.js 16"]
-    PX["proxy.ts<br/>headers/CSP · origin lock · session refresh"]
+    PX["proxy.ts<br/>headers/CSP · origin lock · request ID"]
     API["/api/v1 route handlers"]
     SVC["server-only services<br/>policy · entitlements · quotas · tokens · network key · presign"]
   end

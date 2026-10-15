@@ -145,11 +145,11 @@ Paths follow the target layout in [02 §7](02-system-architecture.md#7-applicati
 
 ### Phase 1
 
-**As built (2026-10-15):** the module layout in [02 §7](02-system-architecture.md#7-application-module-layout-target) lists the files that exist. Differences from the plan below: no `network/probe.ts` or probe route (DV1-3); no `quota/` folder (reservations are SQL functions called from `shares/create.ts` and `shares/complete.ts`); `lib/client/{turnstile.ts, runtime.tsx, use-network.ts, linkify.ts}`, `lib/client/queries/{keys.ts, shares.ts}`, `lib/client/stores/{session.ts, presence.ts, uploads.ts, ui-store.ts}`, `components/local/*`, `scripts/local-stack.cjs`, `supabase/seed.sql`, `tests/integration/**`, `tests/e2e/local-sharing.spec.ts`.
+**As built (2026-10-15):** the module layout in [02 §7](02-system-architecture.md#7-application-module-layout-target) lists the files that exist. Differences from the plan below: no `network/probe.ts` or probe route (DV1-3); no `network/{classify,presence}.ts` (classification and presence are in `network/observe.ts` and `app.observe_network`); no `local/feed.ts` (the feed query is in `shares/read.ts`); storage in `storage/{s3.ts, keys.ts, sniff.ts}` (no `r2.ts`, `presign.ts` or `verify.ts`); no `security/turnstile.ts` (Supabase Auth verifies the token); one `lib/shared/api/schemas.ts` for all zod contracts; `proxy.ts` gained no session refresh (DV1-6); no `quota/` folder (reservations are SQL functions called from `shares/create.ts` and `shares/complete.ts`); `lib/client/{turnstile.ts, runtime.tsx, use-network.ts, linkify.ts}`, `lib/client/queries/{keys.ts, shares.ts}`, `lib/client/stores/{session.ts, presence.ts, uploads.ts, ui-store.ts}`, `components/local/*`, `scripts/local-stack.cjs`, `supabase/seed.sql`, `tests/integration/**`, `tests/e2e/local-sharing.spec.ts`.
 
 | Action | Path |
 |---|---|
-| Modify | `app/page.tsx` ("This network" home), `app/layout.tsx` (Supabase and Turnstile providers), `proxy.ts` (Supabase session refresh) |
+| Modify | `app/page.tsx` ("This network" home), `app/layout.tsx` (Supabase and Turnstile providers), `proxy.ts` (Supabase session refresh; **not done**, see the note above) |
 | Create | `app/(app)/uploads/page.tsx` (My uploads) |
 | Create | `app/api/v1/devices/route.ts`, `app/api/v1/devices/[deviceId]/route.ts`, `app/api/v1/network/observe/route.ts`, `app/api/v1/network/probe/route.ts` (only if the dual-stack probe is adopted) |
 | Create | `app/api/v1/local/shares/route.ts`, `app/api/v1/me/shares/route.ts`, `app/api/v1/shares/route.ts`, `app/api/v1/texts/route.ts` |
@@ -159,7 +159,7 @@ Paths follow the target layout in [02 §7](02-system-architecture.md#7-applicati
 | Create | `lib/client/providers.tsx` (QueryClientProvider + Zustand store providers), `lib/client/queries/{network.ts,local.ts,shares.ts,me.ts}` (TanStack Query key and `queryOptions` contracts), `lib/client/stores/{uploads.ts,ui.ts,presence.ts}` (Zustand) |
 | Create | `lib/shared/api/{devices,network,local,shares,files}.ts` (zod schemas), `lib/shared/constants.ts` |
 | Create | `lib/server/db/{client.ts,types.gen.ts}`, `lib/server/auth/session.ts`, `lib/server/policy/*.ts`, `lib/server/entitlements/{plans.ts,resolve.ts}` (Free only), `lib/server/quota/*.ts`, `lib/server/ratelimit/*.ts` |
-| Create | `lib/server/network/{key.ts,classify.ts,presence.ts,probe.ts}`, `lib/server/local/{feed.ts,visibility.ts}`, `lib/server/shares/{create.ts,complete.ts,text.ts,download.ts,end.ts}` |
+| Create | `lib/server/network/{key.ts,classify.ts,presence.ts,probe.ts}`, `lib/server/local/{feed.ts,visibility.ts}` (as built: no `classify.ts`, `presence.ts`, `probe.ts` or `feed.ts`, see the note above), `lib/server/shares/{create.ts,complete.ts,text.ts,download.ts,end.ts}` |
 | Create | `lib/server/storage/{r2.ts,keys.ts,presign.ts,verify.ts,sniff.ts}`, `lib/server/security/{filenames.ts,content-disposition.ts,turnstile.ts}`, `lib/server/audit/log.ts` |
 | Create | `supabase/migrations/<ts>_phase1_*.sql`, `supabase/tests/phase1_*.test.sql`, `tests/integration/**`, `tests/e2e/local-*.spec.ts` |
 

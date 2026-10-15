@@ -51,7 +51,9 @@ On a VPS, prefer **Cloudflare Tunnel** so the origin has no public ingress at al
 
 ## 6. Turnstile (Phase 1)
 
-- One widget per environment, restricted to that environment's hostnames. Site key → `NEXT_PUBLIC_TURNSTILE_SITE_KEY`, secret → `TURNSTILE_SECRET_KEY`.
+- One widget per environment, restricted to that environment's hostnames.
+- Site key → `NEXT_PUBLIC_TURNSTILE_SITE_KEY` in the app's environment.
+- Secret key → the Supabase project's **Auth captcha settings** (provider Turnstile). Supabase Auth verifies the token at anonymous sign-in. The app never reads the secret, and there is no `TURNSTILE_SECRET_KEY` variable.
 
 ## 7. Conditional rules (decided by SP-04)
 

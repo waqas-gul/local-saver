@@ -2,7 +2,8 @@ import "server-only";
 
 /**
  * The local visibility rule (03 §3.6, G1). Checked on every request that touches a share;
- * the feed applies the same predicate in SQL (lib/server/local/feed.ts).
+ * the feed (listLocalFeed in lib/server/shares/read.ts) applies its network part in SQL, and
+ * creators reach their shares from other networks through My uploads (listMyShares).
  *
  *   visible(share) = scope = 'network' and expires_at > now()
  *     and status = 'active'                     (claimed shares arrive in Phase 3)

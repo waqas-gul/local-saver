@@ -165,7 +165,7 @@ flowchart LR
 - `checks`: install (frozen lockfile, which pnpm checks against its supply-chain policy), typecheck (with Next.js route type generation), lint, Vitest unit and component tests with coverage, `pnpm audit --audit-level high` (one reviewed exception, phase 1 F1-6).
 - `stack`: `pnpm stack:start` (Supabase and RustFS; applies migrations and seed), `supabase test db` (pgTAP), generated-types drift check, `pnpm build`, `pnpm test:integration` (Vitest against `next start` on port 3200), `pnpm test:e2e` (open, origin-locked and full-stack servers).
 
-Every command of both jobs passes locally (2026-10-15). The workflow itself has not run yet: the GitHub remote doesn't exist (AC-0.1). Actions are referenced by major version tag; pin them to commit SHAs when the repository goes public.
+Every command of both jobs passes locally (2026-10-15). The GitHub remote exists. CI's only run, on the push of the Phase 0 commit to `main` (2026-09-29), failed at `pnpm typecheck` (`Cannot find name 'LayoutProps'`); the Phase 1 branch has no pull request, so the current workflow has not run (AC-0.1). Actions are referenced by major version tag; pin them to commit SHAs when the repository goes public.
 
 **Migrations are forward-only.** Expand/contract discipline keeps the previous app version working with the new schema, so rolling back the app means re-pointing the deploy branch to the previous commit.
 
@@ -218,7 +218,7 @@ Phase 1 reads these on the server at request time and the root layout passes the
 | `ORIGIN_SHARED_SECRET`, `ORIGIN_SHARED_SECRET_PREVIOUS` | Origin lock |
 | `ALLOW_TEST_CLIENT_IP` | Tests only. **The production boot refuses to start if set**, and also refuses it with `TRUST_PROXY_MODE=cloudflare`. It takes effect only when `APP_ENV` is set explicitly to `local` or `test`. |
 | `DATABASE_URL` | `app_server` through the Supavisor pooler |
-| `SUPABASE_SECRET_KEY` | Auth admin operations |
+| `SUPABASE_SECRET_KEY` | Optional. Validated when set, but unused in Phase 1; reserved for planned Auth admin operations. |
 | `R2_ACCOUNT_ID`, `R2_BUCKET`, `R2_S3_ENDPOINT`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` | Storage |
 | `NETWORK_KEY_SECRET_CURRENT`, `NETWORK_KEY_SECRET_PREVIOUS`, `NETWORK_KEY_VERSION` | Network keys (DEC-032) |
 | `NETWORK_IPV6_PREFIX_LEN` (default 64) | Local-mode tuning. The large-network cap moved to the runtime flag `network_large_cap` (DV1-5); `NETWORK_PROBE_HOSTS` is not used (no dual-stack probe). |

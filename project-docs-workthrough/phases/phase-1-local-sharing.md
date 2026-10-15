@@ -31,7 +31,7 @@ Also in this phase:
 
 | Area | Contents |
 |---|---|
-| Device bootstrap | Turnstile + Supabase anonymous sign-in, `@supabase/ssr` session cookies with `proxy.ts` refresh, `devices` registration with generated labels and coarse platform, device rename |
+| Device bootstrap | Turnstile + Supabase anonymous sign-in; the browser keeps and refreshes its own session and sends the access token as a bearer header, which the server only verifies (DV1-6, DV1-14; planned originally: `@supabase/ssr` cookies with `proxy.ts` refresh); `devices` registration with generated labels and coarse platform, device rename |
 | Network | `POST /network/observe`: trusted IP, normalization, HMAC network key, network space upsert, classification (Private Relay and Tor lists loaded manually in this phase; ASN list only if SP-04 confirms ASN forwarding), presence (10 min), heartbeat every 5 min and on `focus`/`online`/connection change. **Dual-stack probe only if SP-04 adopts it.** |
 | Guards | Statuses `ok` / `shared_egress` / `too_large` / `blocked` / `unavailable`. Fail closed for viewing and posting. Sticky ≥ 7 days. Status messages. Kill switch `local_sharing_enabled`. |
 | Local feed | `GET /local/shares` for the caller's current eligible network. "My uploads" (`GET /me/shares`) from any network. |
@@ -55,7 +55,7 @@ The Phase 0 foundation: tooling, CI, `proxy.ts` with headers and origin lock, tr
 
 ## 4. What will be changed
 
-New application code in `app/`, `components/`, `lib/client`, `lib/shared`, `lib/server`. Phase 1 migrations and pgTAP tests. Integration and e2e tests. `proxy.ts` gains Supabase session refresh.
+New application code in `app/`, `components/`, `lib/client`, `lib/shared`, `lib/server`. Phase 1 migrations and pgTAP tests. Integration and e2e tests. (`proxy.ts` was planned to gain Supabase session refresh; it did not, DV1-6.)
 
 ## 5. What will NOT be changed
 
@@ -72,16 +72,20 @@ DEC-031 (ACCEPTED), DEC-034 (ACCEPTED, frontend state), DEC-001 (ACCEPTED, Next.
 
 ## 7. Files / modules involved
 
-See [05 §6 — Phase 1](../05-implementation-roadmap.md#phase-1). Key modules:
+Key modules as built (2026-10-15). The whole layout is in [ARCHITECTURE.md §14](../ARCHITECTURE.md#14-current-project-structure) and [02 §7](../02-system-architecture.md#7-application-module-layout-target).
 
-- `lib/server/network/{key.ts, classify.ts, presence.ts, probe.ts}` (`probe.ts` only if the dual-stack probe is adopted)
-- `lib/server/local/{feed.ts, visibility.ts}`
-- `lib/server/shares/{create.ts, complete.ts, text.ts, download.ts, end.ts}`
-- `lib/server/storage/{r2.ts, keys.ts, presign.ts, verify.ts, sniff.ts}`
-- `lib/server/{policy, quota, ratelimit, entitlements, audit}/*`
-- `lib/client/{supabase.ts, realtime.ts, uploader.ts, api-client.ts, device.ts, network.ts, turnstile.tsx}`
-- `lib/client/providers.tsx`, `lib/client/queries/*` (TanStack Query), `lib/client/stores/*` (Zustand), per [02 §3.3](../02-system-architecture.md#33-frontend-state-management-dec-034)
+- `lib/server/network/{client-ip.ts, normalize.ts, key.ts, egress.ts, current.ts, observe.ts}`. There is no `probe.ts`: the dual-stack probe was not built (DV1-3).
+- `lib/server/local/visibility.ts`. The local feed query is in `lib/server/shares/read.ts`.
+- `lib/server/shares/{create.ts, complete.ts, text.ts, download.ts, end.ts, read.ts, dto.ts, expiry.ts}`
+- `lib/server/storage/{s3.ts, keys.ts, sniff.ts}`. Presigning, HEAD, ranged reads, tombstones and deletes are in `s3.ts`; completion checks are in `shares/complete.ts`.
+- `lib/server/{auth, devices, policy, entitlements, ratelimit, audit}/*` and `lib/server/flags.ts`. There is no `quota/` folder: reservations are SQL functions called from `shares/create.ts` and `shares/complete.ts`.
+- `lib/client/{supabase.ts, runtime.tsx, config.tsx, api-client.ts, realtime.ts, network.ts, use-network.ts, uploader.ts, turnstile.ts, linkify.ts}`
+- `lib/client/providers.tsx`, `lib/client/queries/{keys.ts, shares.ts}` (TanStack Query), `lib/client/stores/{ui-store.ts, session.ts, uploads.ts, presence.ts}` (Zustand), per [02 §3.3](../02-system-architecture.md#33-frontend-state-management-dec-034)
+- `lib/shared/api/schemas.ts` (zod contracts), `lib/shared/plans.ts`
+- `components/local/*`, `components/ui/*`
 - `app/page.tsx` ("This network" home), `app/(app)/uploads/page.tsx`, and all Phase 1 route handlers under `app/api/v1/`
+
+Planned names that were not used: `network/{classify.ts, presence.ts, probe.ts}`, `local/feed.ts`, `storage/{r2.ts, presign.ts, verify.ts}`, `quota/`, `lib/client/{device.ts, turnstile.tsx}` (plan in [05 §6](../05-implementation-roadmap.md#phase-1)).
 
 ## 8. Database changes
 
@@ -118,7 +122,7 @@ All Phase 1 endpoints in [02 §6.2](../02-system-architecture.md#62-endpoint-cat
 ## 11. Dependencies
 
 - **Phase:** Phase 0 VERIFIED.
-- **Packages (to be approved at task-plan time):** `@supabase/supabase-js`, `@supabase/ssr`, `@tanstack/react-query` (+ devtools, dev only), `zustand`, `@aws-sdk/client-s3`, `@aws-sdk/s3-request-presigner`, `file-type`, `pino`, a Turnstile wrapper, a permissively licensed UA parser (or an internal one).
+- **Packages (to be approved at task-plan time):** `@supabase/supabase-js`, `@supabase/ssr`, `@tanstack/react-query` (+ devtools, dev only), `zustand`, `@aws-sdk/client-s3`, `@aws-sdk/s3-request-presigner`, `file-type`, `pino`, a Turnstile wrapper, a permissively licensed UA parser (or an internal one). **As built:** `@supabase/ssr`, devtools, `file-type`, `pino`, the Turnstile wrapper and a UA parser were not added; small internal modules and the Phase 0 logger are used instead (DV1-7, DV1-14).
 - **Data:** Apple iCloud Private Relay egress CSV and the Tor exit list, loaded into `network_egress_ranges` with a documented manual procedure. An ASN list only if SP-04 confirms forwarding and a commercially licensed source.
 - **Infrastructure (only if the dual-stack probe is adopted):** `v4.` and `v6.` probe hostnames configured as SP-04 recommends.
 
@@ -186,7 +190,7 @@ The owner instructed on 2026-10-15: *"Start Phase 1 — Local Network Sharing �
 
 | Missing dependency | Consequence for Phase 1 |
 |---|---|
-| Phase 0 owner items: GitHub remote, staging (Cloudflare, Supabase, R2), hosting | Phase 1 is built and tested **on the local stack only**: Supabase CLI (Postgres, Auth, Realtime), RustFS as the S3/R2 stand-in, `next start`. Acceptance criteria needing staging or real devices stay open. |
+| Phase 0 owner items: branch protection and a green CI run, staging (Cloudflare, Supabase, R2), hosting | Phase 1 is built and tested **on the local stack only**: Supabase CLI (Postgres, Auth, Realtime), RustFS as the S3/R2 stand-in, `next start`. Acceptance criteria needing staging or real devices stay open. |
 | SP-04 (dual-stack probe, ASN forwarding, real-world grouping) | The documented fallback applies ([03 §3.4–§3.5](../03-security-and-network-design.md#34-dual-stack-binding-conditional-on-sp-04)): **only the current request's key counts**, no probe endpoint, no binding or ASN tables. `shared_egress` comes from the egress-range lists only. T-009 and the ASN part of T-005 don't apply. |
 | SP-03 (Supabase anonymous auth, private Realtime) | Verified on the local stack as part of this phase (integration tests T-015 … T-017). Hosted behaviour still needs SP-03. |
 | SP-02 (R2 semantics) | RustFS checked on 2026-10-15 for signed headers (403 on a mismatched or missing header), stored `Content-Disposition`, ranged GET, presigned expiry, bucket CORS and idempotent delete. R2 itself still needs SP-02. |
@@ -266,7 +270,7 @@ Test-first: each task starts with failing tests (pgTAP, Vitest unit or integrati
 | P1-09 Client | Public config at request time (DV1-8), browser runtime and bootstrap (anonymous sign-in, Turnstile when configured, device), API client (bearer, one refresh-and-retry, zod parsing), query factories, Realtime bridge (signals → invalidation only, presence roster, hidden-tab disconnect), network-change cache removal, uploader (XHR progress throttled to 10/s), Zustand stores (UI, session, uploads, presence) | Unit + component tests |
 | P1-10 UI | "This network" home, audience line, one-time notice, composer (text/files, expiry), upload progress, feed cards (copy, creator edit/delete, previews, risky-file confirmation), My uploads, device rename, status copy | Component tests; screenshots in `evidence/phase-1/` |
 | P1-11 E2E | `local` Playwright project on a third server (full stack): two browser contexts per test as devices on simulated networks | **5/5** (plus the 13 Phase 0 smoke tests), three consecutive runs |
-| P1-12 CI | Two jobs: `checks` (typecheck, lint, unit+component with coverage, audit) and `stack` (stack start, pgTAP, generated-types diff, build, integration, E2E) | YAML written; **not run** (no GitHub remote, Phase 0 AC-0.1) |
+| P1-12 CI | Two jobs: `checks` (typecheck, lint, unit+component with coverage, audit) and `stack` (stack start, pgTAP, generated-types diff, build, integration, E2E) | YAML written; **not run**. The GitHub remote exists. CI's only run, on the push of the Phase 0 commit to `main` (2026-09-29), failed at `pnpm typecheck` (`Cannot find name 'LayoutProps'`); the Phase 1 branch has no pull request, so the current workflow has not run (Phase 0 AC-0.1). |
 | P1-13 Docs | This file, 00, 02, 03, 04, 05, 06, 07, 08, 09, README; [runbooks/egress-lists.md](../runbooks/egress-lists.md) | Link check |
 
 **Test totals after the second review pass** are in §18.5.5. **Totals after the first security review fixes (local, 2026-10-15):** typecheck and lint clean. Vitest unit + component **238/238** (29 files). pgTAP **117/117** (28 baseline + 89 Phase 1). API integration **71/71** (6 files). Playwright **18/18** (13 Phase 0 + 5 Phase 1); before the review fixes, three consecutive runs and one run with a developer `.env.local` present were also green. `pnpm build` clean. Generated database types unchanged by `pnpm db:types`. `pnpm audit --audit-level high`: clean with one documented exception (F1-6). Unit coverage is 44% of lines because services and UI are exercised by the integration and E2E suites, which don't report coverage.
@@ -292,7 +296,7 @@ Test-first: each task starts with failing tests (pgTAP, Vitest unit or integrati
 | AC | Status | Evidence / what is missing |
 |---|---|---|
 | AC-1.1 | ✅ Met on the local stack | E2E: a second device sees existing shares with no join step; a new post appears on the other device in under 2 s (three runs). Integration: realtime delivery < 2 s. |
-| AC-1.2 | ✅ Met on the local stack | T-001, T-003, T-010 (integration and E2E). CI run pending (no remote). |
+| AC-1.2 | ✅ Met on the local stack | T-001, T-003, T-010 (integration and E2E). CI run pending (no pull request yet). |
 | AC-1.3 | ◐ **BLOCKED for T-009** | T-001 … T-008, T-010, T-015, T-016 pass; IDOR matrix covers 100% of Phase 1 routes and methods (enforced by a test). The fallback that applies without SP-04 (only the current request's key counts; a household's IPv4 and IPv6 never merge) is now tested locally. **T-009 itself (dual-stack binding) and the ASN part of T-005 need SP-04** on real Cloudflare and networks; until SP-04 decides, they can't be built or tested. |
 | AC-1.4 | ✅ Met | `shared_egress`, `too_large`, `blocked`, `unavailable` (incl. kill switch) hide content and refuse posting; creators keep My uploads (T-004, T-005, T-007, T-013, T-014). |
 | AC-1.5 | ✅ Met | Text create, creator edit with 409, creator delete, live updates on the other device; non-creators get 403 `NOT_CREATOR` (T-011, E2E). |
@@ -397,7 +401,7 @@ The owner asked for the remaining review items and verification gaps to be close
 | E2E (Playwright) | **20/20**: 13 Phase 0, 5 Phase 1 desktop, 2 emulated phones (WebKit, Chromium) |
 | `pnpm audit --audit-level high` | Clean; one documented exception (`braces`, F1-6) |
 | Documentation link check | 0 broken links |
-| CI | Not run (no GitHub remote) |
+| CI | Not run (no pull request; the remote exists, see §18.5.9) |
 
 #### 18.5.6 Assumed product decisions (§17.2) against the documented recommendations
 
@@ -445,7 +449,7 @@ Every remaining item needs something only the owner can provide; the exact steps
 | AC-1.11 real devices and networks | Staging + devices + networks (§3–§5, §8) |
 | AC-1.12 copy approval | Owner review (§18.5.7) |
 | Decisions | Q-007, Q-019 (Firefox 128), Q-021, Q-023, Q-029, Q-030 confirmations; **Q-031** (Supabase Auth IP storage) |
-| CI | A GitHub remote (Phase 0 AC-0.1) |
+| CI | A pull request so the current workflow runs, a green run, and branch protection (Phase 0 AC-0.1). The GitHub remote exists. CI's only run, on the push of the Phase 0 commit to `main` (2026-09-29), failed at `pnpm typecheck` (`Cannot find name 'LayoutProps'`); the Phase 1 branch has no pull request, so the current workflow has not run. |
 
 ### 18.6 Owner follow-up (third pass, 2026-10-15)
 
@@ -481,4 +485,4 @@ No test was removed or weakened. The changed assertions are the two status-line 
 
 #### 18.6.3 Still blocked
 
-Unchanged from §18.5.9: AC-1.3 (T-009, needs SP-04), AC-1.6 (real phones), AC-1.8 (staging and R2 lifecycle), AC-1.9 (staging), AC-1.11 (real devices and networks), AC-1.12 (owner sign-off of the remaining texts and screenshots), the six assumed answers and Q-031, and CI (no remote). The steps are in the [manual and staging procedure](phase-1-manual-verification.md). Phase 1 stays **NEEDS REVIEW** until that verification is done.
+Unchanged from §18.5.9: AC-1.3 (T-009, needs SP-04), AC-1.6 (real phones), AC-1.8 (staging and R2 lifecycle), AC-1.9 (staging), AC-1.11 (real devices and networks), AC-1.12 (owner sign-off of the remaining texts and screenshots), the six assumed answers and Q-031, and CI (no pull request run yet). The steps are in the [manual and staging procedure](phase-1-manual-verification.md). Phase 1 stays **NEEDS REVIEW** until that verification is done.

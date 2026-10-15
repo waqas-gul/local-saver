@@ -673,13 +673,13 @@ Notes:
 
 | Secret | Used by | Storage | Rotation | Blast radius if leaked |
 |---|---|---|---|---|
-| `SUPABASE_SECRET_KEY` | Server (admin operations), janitor | Host env, Edge Function secrets | 90 days / on incident | Full data access (bypasses RLS) |
+| `SUPABASE_SECRET_KEY` | **Nothing yet.** The server validates it when set (`lib/server/env.ts`), but no code uses it. Planned for server admin operations and the Phase 3 storage janitor (not built). | Host env (and Edge Function secrets once the janitor exists) | 90 days / on incident | Full data access (bypasses RLS) |
 | `DATABASE_URL` (least-privilege app role) | Server | Host env | 90 days | Application data |
 | R2 access keys: **web** token (object read/write, one bucket), **janitor** token (separate) | Server; janitor | Env | 90 days | Bucket objects |
 | `NETWORK_KEY_SECRET` (current + previous) | Server | Env | Yearly or on incident, with a 100-day overlap (§3.2) | De-anonymization of network keys (IPv4 keys can be brute-forced with the secret). It does **not** by itself grant access to local content, which also needs a request from that network. |
 | `LINK_PEPPER`, `CODE_PEPPER`, `INVITE_PEPPER` (versioned) | Server | Env | Rarely (version column allows it) | Offline verification of leaked hashes |
 | `ORIGIN_SHARED_SECRET` (2 accepted during rotation) | Cloudflare Transform Rule and `proxy.ts` | Cloudflare and env | 90 days | Origin-lock bypass → IP spoofing |
-| `TURNSTILE_SECRET_KEY` | Server | Env | Yearly / incident | Bot protection bypass |
+| Turnstile secret key | Supabase Auth, which verifies the Turnstile token at anonymous sign-in. **Not used by the app**: there is no `TURNSTILE_SECRET_KEY` variable (phase 1 DV1-9). | The Supabase project's Auth captcha settings | Yearly / incident | Bot protection bypass |
 | `JANITOR_TRIGGER_SECRET` | pg_cron (Vault) → Edge Function | Supabase Vault and function secrets | 90 days | Janitor triggering (it only deletes outbox entries) |
 | Billing API key / webhook secret (Phase 4) | Server | Env | Per provider guidance | Billing tampering |
 | `NEXT_SERVER_ACTIONS_ENCRYPTION_KEY` (only if multi-instance) | Next.js | Env | On deploy policy | Action closure decryption |

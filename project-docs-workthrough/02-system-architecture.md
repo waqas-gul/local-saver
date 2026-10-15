@@ -27,7 +27,7 @@
 
 | Component | Proposed by owner | Verdict | Required changes / notes |
 |---|---|---|---|
-| **Next.js (App Router)** | Yes | **Keep — confirmed by the owner** (DEC-001 ACCEPTED, 2026-09-23) | The frontend and full-stack framework. Already installed (16.3.5). Use route handlers as a JSON API (`/api/v1`), `proxy.ts` for headers, origin lock and session refresh, and a server-only data access layer. Don't route uploads through it. |
+| **Next.js (App Router)** | Yes | **Keep — confirmed by the owner** (DEC-001 ACCEPTED, 2026-09-23) | The frontend and full-stack framework. Installed: 16.3.8 (16.3.5 until Phase 1, DV1-16). Use route handlers as a JSON API (`/api/v1`), `proxy.ts` for headers, CSP and the origin lock, and a server-only data access layer. `proxy.ts` does not refresh sessions: the browser refreshes its own Supabase session, and the server only verifies the bearer access token (phase 1 DV1-6, DV1-14). Don't route uploads through it. |
 | **TypeScript** | Yes | **Keep** | `strict` is already on. Share zod schemas between client and server for API contracts. |
 | **Tailwind CSS** | Yes | **Keep** | v4 is installed. |
 | **shadcn/ui** | Yes | **Keep — accepted by the owner** (DEC-001, DEC-035, 2026-09-29) | Initialized in Phase 0: Radix base, Nova preset (Lucide, Geist), theme tokens as CSS variables in `app/globals.css`, components in `components/ui/`. Its Radix primitives give accessible dialogs, toasts and menus. Components are copied into the repo, so there is no runtime dependency lock-in. Radix's server-rendered `style` attributes need `style-src-attr 'unsafe-inline'` in the CSP ([03 §11](03-security-and-network-design.md#11-web-security-headers-and-content-security-policy)). |
@@ -427,7 +427,7 @@ Policies live on `realtime.messages` and call a `SECURITY DEFINER` helper, `app_
 
 ### 6.2 Endpoint catalogue (by phase)
 
-**Phase 1 rows are implemented** (2026-10-15) except the probe. Request and response contracts: `lib/shared/api/schemas.ts`. `POST /api/v1/shares` and `POST /api/v1/texts` answer `201`; `DELETE` answers `204`. Error codes added in Phase 1: `UNAUTHENTICATED`, `DEVICE_REQUIRED`, `DEVICE_UNKNOWN` (401); `NOT_CREATOR`, `USER_SUSPENDED`, `UPLOADS_RESTRICTED` (403); `NOT_FOUND` (404, also for "not visible"); `LOCAL_SHARING_UNAVAILABLE`, `VERSION_CONFLICT`, `UPLOAD_INCOMPLETE`, `UPLOAD_EXPIRED`, `STORAGE_QUOTA_EXCEEDED` (409); `FILE_TOO_LARGE`, `TOO_MANY_FILES`, `TEXT_TOO_LARGE` (413); `INVALID_EXPIRY`, `UPLOAD_REJECTED`, `PREVIEW_UNAVAILABLE` (422); `RATE_LIMITED`, `DAILY_UPLOAD_LIMIT` (429 with `Retry-After`); `UPLOADS_DISABLED`, `SERVICE_NOT_CONFIGURED` (503).
+**Phase 1 rows are implemented** (2026-10-15) except the probe. Request and response contracts: `lib/shared/api/schemas.ts`. `POST /api/v1/shares` and `POST /api/v1/texts` answer `201`; `DELETE` answers `204`. Error codes added in Phase 1: `UNAUTHENTICATED`, `DEVICE_REQUIRED`, `DEVICE_UNKNOWN` (401); `NOT_CREATOR`, `USER_SUSPENDED`, `UPLOADS_RESTRICTED` (403); `NOT_FOUND` (404, also for "not visible"); `LOCAL_SHARING_UNAVAILABLE`, `VERSION_CONFLICT`, `UPLOAD_INCOMPLETE`, `UPLOAD_EXPIRED`, `STORAGE_QUOTA_EXCEEDED` (409); `FILE_TOO_LARGE`, `TOO_MANY_FILES`, `TEXT_TOO_LARGE` (413); `EXPIRY_NOT_ALLOWED`, `UPLOAD_REJECTED`, `PREVIEW_UNAVAILABLE` (422); `RATE_LIMITED`, `DAILY_UPLOAD_LIMIT` (429 with `Retry-After`); `UPLOADS_DISABLED`, `SERVICE_NOT_CONFIGURED` (503).
 
 | Phase | Method & path | Purpose | Caller |
 |---|---|---|---|
@@ -531,7 +531,7 @@ tests/unit · tests/component · tests/integration · tests/e2e   # Vitest / Vit
 | Client state | Zustand for client-only state, TanStack Query for server state, Realtime for live signals only (DEC-034, §3.3). API responses are parsed with the shared zod schemas inside query functions before entering the cache. |
 | Output shaping | DTO mappers per actor type (device on the network, creator, link viewer, room member). Never serialize rows. Enable React taint APIs for secrets as an extra layer. |
 | Transactions and atomicity | Services own transactions. Race-sensitive operations (claim, reserve storage, attempt counters) are single conditional SQL statements or `SECURITY DEFINER` functions. |
-| Side effects | DB outbox tables (`object_deletions`) instead of fire-and-forget calls. `after()` only for non-critical work (logging). |
+| Side effects | DB outbox tables (`object_deletions`) instead of fire-and-forget calls. `after()` only for best-effort work after the response: logging, and in Phase 1 the storage deletion sweep (`lib/server/shares/end.ts`). The outbox row stays the durable record, so a sweep that doesn't run only delays the deletion. |
 | Kill switches | `app.runtime_flags` table (cached ≤ 30 s): `uploads_enabled`, `remote_links_enabled`, `local_sharing_enabled`, `anonymous_uploads_enabled`, for incident and abuse response. Per-network block via `network_spaces.status`. |
 | Logging | Structured JSON. Redact cookies, `authorization`, `x-origin-auth`, link secrets, codes, probe nonces, passwords and `X-Amz-Signature`. IPs never logged raw. |
 | Accessibility | Radix-based shadcn/ui components. Keyboard-operable upload and download. Live regions for realtime updates. |
