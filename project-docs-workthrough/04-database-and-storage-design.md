@@ -338,7 +338,7 @@ for each row execute function app.emit_share_changed();
 | `retention_class` | text CHECK (`d7`, `d30`, `d90`, `ws`) | Matches the object key prefix |
 | `expires_at` | timestamptz null | Null only when `retention_class = 'ws'` and workspace policy allows no expiry |
 | `burn_after_download` | bool default false | |
-| `claimed_at`, `claimed_by_user_id`, `claimed_device_id`, `claimed_link_session_id`, `claim_grace_until` | | Burn claim state |
+| `claimed_at`, `claimed_by_user_id`, `claimed_device_id`, `claimed_link_session_hash`, `claimed_link_id`, `claim_grace_until` | | Burn claim state. **As built (Phase 3):** `claimed_link_session_hash bytea` (32 bytes: link sessions are keyed by the cookie's SHA-256, C-8); `claimed_link_id text`, checked, without a foreign key (DV3-2). |
 | `file_count`, `total_bytes` | int, bigint | |
 | `entitlement_snapshot` | jsonb not null | Limits and features applied at creation |
 | `ended_at`, `end_reason` | timestamptz, text CHECK (`expired`, `consumed`, `deleted_by_creator`, `deleted_by_owner`, `blocked`, `upload_failed`, `room_deleted`, `account_deleted`) | |
@@ -351,6 +351,11 @@ for each row execute function app.emit_share_changed();
   - `CHECK (expires_at IS NOT NULL OR retention_class = 'ws')`
   - `CHECK (status <> 'claimed' OR burn_after_download)`
   - `CHECK ((status IN ('pending_upload','active','claimed')) = (ended_at IS NULL))`
+  - Phase 3, as built:
+    - `shares_claim_columns`: no claim columns on `pending_upload` or `active` shares. An ended share keeps its claim for audit (DV3-3).
+    - `shares_claim_complete`: a claimed share has `claimed_at`, `claim_grace_until` and exactly one claimant kind.
+    - `shares_claim_grace`: grace ≤ `claimed_at + 6 h` and ≤ `expires_at` (D-6).
+    - `shares_consumed_requires_burn`.
 - **Indexes:**
   - `(network_space_id, created_at DESC) WHERE status IN ('pending_upload','active')` for the local feed
   - `(room_id, created_at DESC) WHERE status IN ('pending_upload','active')` (Phase 4)
@@ -452,7 +457,7 @@ for each row execute function app.emit_share_changed();
 |---|---|
 | Buckets | `{product}-files-staging`, `{product}-files-prod` (optionally `-dev`). Location hint near the primary users (Q-016). |
 | Access | **Private**: public access off, `r2.dev` subdomain off, no custom domain (unless a download Worker is added later) |
-| API tokens | `web-app` (Object Read & Write, scoped to one bucket). `janitor` (separate token, same scope). Admin credentials kept out of runtime environments. |
+| API tokens | `web-app` (Object Read & Write, scoped to one bucket). `janitor` (separate token, same scope). Admin credentials kept out of runtime environments. Object Read & Write is the narrowest R2 level that can delete, and it can also read and overwrite every object in the bucket (RISK-037). |
 | CORS | Allowed origins: exact app origins per environment. Methods: `PUT`, `GET`, `HEAD`. Allowed headers: `content-type`, `content-disposition`, `cache-control`. Exposed headers: `ETag`. Max age 3600 s. |
 | Lifecycle rules | See the table below |
 
@@ -463,6 +468,7 @@ for each row execute function app.emit_share_changed();
 | `backstop-d90` | `d90/` | Delete 91 days after creation |
 | `abort-multipart` | *(all)* | Abort incomplete multipart uploads after 1 day |
 | *(no rule)* | `ws/` | Application-managed retention within workspace quota |
+| *(no rule)* | `hold/` | Legal-hold copies (Phase 3 security review): kept until an operator releases the hold, then deleted by the janitor |
 
 ### 8.3 Object key strategy (DEC-010)
 
@@ -478,6 +484,7 @@ d7/2026/09/17/3f0c2a4e-8b6d-4c1e-9a57-0e5d1f7b2c90
 | `fileId` (UUIDv4) | Unguessable. **No filename, user, room or workspace identifiers in keys.** |
 
 - Keys match `^(d7|d30|d90|ws)/\d{4}/\d{2}/\d{2}/[0-9a-f-]{36}$`. The janitor refuses anything else.
+- **Legal-hold copies (Phase 3):** `hold/<key>`, made by the janitor with a server-side `CopyObject` when a takedown holds an object. R2's lifecycle rules ignore holds, and no rule covers `hold/`. No file row ever points at a copy, and reconciliation only counts them.
 - **Extending expiry beyond the class** (Phase 4): server-side `CopyObject` to the new prefix, update `object_key` and `expires_at` in one transaction, enqueue the old key for deletion.
 
 ### 8.4 Object headers fixed at upload (signed)
@@ -514,7 +521,7 @@ Only non-PII custom metadata is allowed (for example `x-amz-meta-file-id`).
 | Completion call (`HeadObject`) | A file becomes `verified` only if the bytes exist with the exact declared size |
 | Stale upload sweep | Pending files past their deadline are rejected, with object deletion enqueued |
 | Deletion outbox | The database decides what ends. Deletion requests are written in the same transaction, and the janitor executes them. |
-| Weekly reconciliation (janitor `reconcile` mode) | Lists `{class}/{date}/` prefixes. **Orphans** (no matching file row, or already marked deleted, older than 48 h) are deleted. **Missing objects** (a `verified` file row whose object is gone) are marked and trigger an alert (possible data loss). |
+| Weekly reconciliation (janitor `reconcile` mode) | Lists `{class}/{date}/` prefixes. **Orphans** (no matching file row, or already marked deleted, older than 48 h) are deleted. **Missing objects** (a `verified` file row whose object is gone) are marked and trigger an alert (possible data loss). **As built (Phase 3):**<br>• the whole bucket is listed page by page with a saved cursor (`app.storage_reconcile_runs`);<br>• orphans are **queued** as `orphan` outbox rows after an SQL recheck, never deleted directly;<br>• unknown key formats are counted only;<br>• missing objects get `files.object_missing_at`, and only files verified at least an hour before the run count;<br>• multipart uploads are reported, and those older than 24 h aborted. |
 
 ### 8.7 Safe deletion
 
@@ -528,6 +535,20 @@ Only non-PII custom metadata is allowed (for example `x-amz-meta-file-id`).
   - A `JANITOR_DRY_RUN` flag.
   - An alert on daily deletion-volume anomalies.
 - Burn shares: `not_before = claim_grace_until + 5 min`.
+- **As built (Phase 3, [phase 3 §18](phases/phase-3-expiry-one-time-download.md#18-implementation-2026-10-16)):**
+  - **One executor (D-1).** Request paths never touch objects, not even after a failed verification: they write outbox rows only. The `storage-janitor` Edge Function executes them as `app_janitor`.
+  - **Batches.** 100 rows per batch, at most 500 per invocation (P3-00).
+  - **Single-object DeleteObject only.** No `DeleteObjects` until SP-02 confirms it (RISK-011).
+  - **Guard rails in SQL** (`app.janitor_claim_deletions`):
+    - the key format, checked again in the core;
+    - no file of an open share (`pending_upload`, `active`, `claimed`) uses the key;
+    - not on legal hold.
+
+    A refused row is parked for a day, logged at error level and shown on `/health/cron`.
+  - **Dry run.** The `JANITOR_DRY_RUN` function secret.
+  - **Volume alert.** `janitor_daily_volume_alert`, 10,000 a day.
+  - **Consumed burn shares** wait `now() + 5 min` from consumption, which is at or before the grace end.
+  - **Takedowns** set `legal_hold` (D-2). The janitor copies each held object to `hold/<key>` (`app.janitor_claim_hold_copies`, `hold_copy`) and deletes both after the release (security review, RISK-031).
 
 ### 8.8 Storage quota tracking (DEC-019)
 
@@ -554,7 +575,7 @@ returning bytes_committed, bytes_reserved;
   - Commit the actual bytes at completion (actual must equal declared).
   - Release on reject or timeout.
   - **Decrement committed bytes when the share ends** (logical end, not physical deletion).
-- **Reconciliation:** a daily recount from `files` (verified, share not ended). Drift > max(1 MB, 0.1%) is corrected and raises an alert.
+- **Reconciliation:** a daily recount from `files` (verified, share not ended). Drift > max(1 MB, 0.1%) is corrected and raises an alert. **As built (Phase 3):** `app.reconcile_storage_usage` locks each ledger row, then recounts in new statements (race-free, tested with concurrent completions), audits `storage.drift_corrected` above the threshold, and reports `storageDrift` on `/health/cron`. It covers 1,000 subjects per run, with a rotating cursor (DV3-11).
 - **Over quota** (for example after a downgrade): new uploads are blocked. Existing content is untouched until it expires (Team rules in [07](07-plans-and-entitlements.md#5-upgrades-downgrades-and-over-quota-behaviour)).
 
 ### 8.9 Storage cost illustrations (R2 Standard)
@@ -591,14 +612,16 @@ returning bytes_committed, bytes_reserved;
 | `purge-idle-spaces` | daily | pg_cron SQL | Delete network spaces with no active shares and no presence for 30 days | 1 |
 | `finalize-burn-claims` | every minute | pg_cron SQL | `claimed` past grace → `end_share(..,'consumed')` | 3 |
 | `trigger-storage-janitor` | every minute | pg_cron + pg_net | POST to the Edge Function (secret header) **only if** due outbox rows exist | 3 |
-| `purge-tombstones` | daily 03:00 UTC | pg_cron SQL | Delete ended shares past `metadata_purge_after`, and `downloads`/`audit_events` past `retention_until` | 3 |
-| `cleanup-anonymous-users` | daily 03:30 UTC | pg_cron SQL | Delete `auth.users` where `is_anonymous` and inactive for 30 days, with no active shares (batches of 1,000) | 3 |
-| `reconcile-storage-usage` | daily 04:00 UTC | pg_cron SQL | Recount committed bytes, correct and alert | 3 |
-| `reconcile-r2-orphans` | weekly | Edge Function (janitor `reconcile` mode) | Orphan and missing-object detection | 3 |
-| `refresh-egress-ranges` | daily | Edge Function | Load Apple Private Relay ranges and the Tor exit list (and the ASN list when adopted) | 1 (manual load) → 3 (scheduled) |
-| `cron-heartbeat` | every 5 min | pg_cron SQL | Update `app.runtime_flags('cron_heartbeat')`. `/api/v1/health/cron` exposes staleness to the uptime monitor. | 3 |
+| `purge-tombstones` | daily 03:03 UTC (as built) | pg_cron SQL | Delete ended shares past `metadata_purge_after`, and `downloads`/`audit_events` past `retention_until`. As built: also completed outbox rows after 30 days; never shares with open or held deletions or with abuse reports, nor their downloads, the audit events about them, or `admin.*`/`report.*` events (D-3). | 3 |
+| `cleanup-anonymous-users` | daily 03:33 UTC (as built) | pg_cron SQL | Delete `auth.users` where `is_anonymous` and inactive for 30 days, with no active shares (batches of 1,000). As built: also no recent session refresh, claim, reservation or stored bytes, and **never suspended users** (D-9). | 3 |
+| `reconcile-storage-usage` | daily 04:04 UTC (as built) | pg_cron SQL | Recount committed bytes, correct and alert | 3 |
+| `reconcile-r2-orphans` | weekly (Sunday 05:06 UTC as built) | Edge Function (janitor `reconcile` mode) | Orphan and missing-object detection. The minute trigger keeps posting `reconcile` while a run is open. | 3 |
+| `refresh-egress-ranges` | daily 02:20 UTC | **GitHub Actions** (as built, D-4; the Edge Function was too small, P3-00) | Load Apple Private Relay ranges and the Tor exit list (and the ASN list when adopted) | 1 (manual load) → 3 (scheduled) |
+| `cron-heartbeat` | every 5 min (`2-59/5` as built) | pg_cron SQL | Update `app.runtime_flags('cron_heartbeat')`. `/api/v1/health/cron` exposes staleness to the uptime monitor. | 3 |
 
-**Storage executor (Phase 1 as built).** Every object deletion goes through the outbox. `app.claim_object_deletions(share_id, limit)` claims due rows for two minutes and says, per row, whether an upload URL may still be live (its recorded expiry plus 5 min of clock-skew grace). Live: the executor overwrites the object with an empty tombstone and reschedules the row for the end of the hold; otherwise it deletes the object and completes the row ([03 §7.7](03-security-and-network-design.md#77-deleting-objects-while-upload-urls-are-live-phase-1-as-built)). Phase 1 runs the executor right after a delete or rejection for that share, then sweeps up to 10 due rows of any share after the response, which also removes objects of shares the jobs ended. Phase 3's janitor makes execution durable and prompt and **must keep the tombstone rule**. The R2 lifecycle rules stay the backstop.
+**As built (Phase 3).** Each Phase 3 job runs through `app.run_job(name)`, which records a heartbeat in `app.job_heartbeats` on success and on failure. The failure is caught, so pg_cron's run log shows success (DV3-12). `app.cron_health` reads the heartbeats for `/api/v1/health/cron`. Minutes are offset so at most 8 jobs start together.
+
+**Storage executor (Phase 1 as built).** Every object deletion goes through the outbox. `app.claim_object_deletions(share_id, limit)` claims due rows for two minutes and says, per row, whether an upload URL may still be live (its recorded expiry plus 5 min of clock-skew grace). Live: the executor overwrites the object with an empty tombstone and reschedules the row for the end of the hold; otherwise it deletes the object and completes the row ([03 §7.7](03-security-and-network-design.md#77-deleting-objects-while-upload-urls-are-live-phase-1-as-built)). Phase 1 runs the executor right after a delete or rejection for that share, then sweeps up to 10 due rows of any share after the response, which also removes objects of shares the jobs ended. Phase 3's janitor makes execution durable and prompt and **must keep the tombstone rule**. The R2 lifecycle rules stay the backstop. **Phase 3 as built:** the request-path executor and sweep are removed (D-1). The janitor keeps the tombstone rule through `app.janitor_claim_deletions` and `janitor_finish_deletion`. `claim_object_deletions` stays in the schema, granted to nobody.
 
 ### 9.3 Expiry timeline (normal share)
 
@@ -607,7 +630,7 @@ returning bytes_committed, bytes_reserved;
 | **T** = `expires_at` | All API paths deny access (request-time check) |
 | T + ≤ 1 min | `expire-shares` ends the share: text nulled, links invalid, quota released, deletions enqueued, `share.changed` emitted |
 | T + ≤ 2–5 min | The janitor deletes the objects (Phase 3+) |
-| T + class max + 1 day + ≤ 24 h | The R2 lifecycle backstop removes anything missed |
+| T + class max + 1 day + ≤ 24 h | The R2 lifecycle backstop removes anything missed. Held objects included: their `hold/` copy is what survives. |
 | Ended + 30 days (Free) | Tombstone metadata purged |
 
 ### 9.4 Burn-after-download timeline
@@ -655,7 +678,9 @@ returning bytes_committed, bytes_reserved;
 
 | Table | Key fields | Expiry |
 |---|---|---|
-| `object_deletions` | `id bigint`, `bucket`, `object_key`, `multipart_upload_id null`, `reason`, `source_file_id`, `requested_at`, `not_before`, `attempts`, `locked_until`, `last_error`, `tombstoned_at`, `completed_at`. Unique partial `(bucket, object_key) WHERE completed_at IS NULL`. Phase 1 has no `bucket` column (one bucket per environment). | Completed rows deleted after 30 days |
+| `object_deletions` | `id bigint`, `bucket`, `object_key`, `multipart_upload_id null`, `reason`, `source_file_id`, `requested_at`, `not_before`, `attempts`, `locked_until`, `last_error`, `tombstoned_at`, `completed_at`. Unique partial `(bucket, object_key) WHERE completed_at IS NULL`. Phase 1 has no `bucket` column (one bucket per environment). Phase 3 adds `last_attempt_at`, `legal_hold`, `hold_reason`, and the reason `orphan`; there is still no `multipart_upload_id` (C-5). | Completed rows deleted after 30 days (Phase 3 `purge-tombstones`) |
+| `job_heartbeats` (Phase 3) | `job PK`, `last_started_at`, `last_succeeded_at`, `last_failed_at`, `last_error (≤ 200)`, `last_result jsonb` (counts only) | Overwritten per run |
+| `storage_reconcile_runs` (Phase 3) | `id`, `started_at`, `finished_at`, `status (running, finished)`, `last_key` (cursor), `locked_until`, `counts jsonb`; one running at a time | Kept |
 | `audit_events` | `id bigint`, `occurred_at`, `actor_kind`, `actor_user_id`, `actor_device_id`, `workspace_id`, `network_space_id`, `room_id`, `action`, `target_type`, `target_id`, `metadata jsonb` (no secrets), `ip_hmac null`, `retention_until` | By `retention_until` (security ≥ 90 days; plan-based). Partition monthly when volume requires. |
 | `abuse_reports` | `id`, `link_id`, `share_id`, `network_space_id`, `room_id`, `category`, `details (≤ 2,000)`, `reporter_email`, `reporter_user_id`, `reporter_network_key`, `status`, `created_at`, `resolved_at`, `resolved_by_user_id`, `action_taken`, `evidence_retained_until` | Per legal advice |
 | `runtime_flags` | `key PK`, `enabled`, `value jsonb`, `updated_at`, `updated_by`, `note` | — |
@@ -671,7 +696,12 @@ returning bytes_committed, bytes_reserved;
 | `app.reserve_storage(subject_type, subject_id, bytes, quota)` | Quota reservation (§8.8) | Single conditional UPDATE, never exceeds the quota |
 | `app.commit_reservation(reservation_id, actual_bytes)` / `app.release_reservation(id)` | Settle a reservation | Row-locked, idempotent by status |
 | `app.end_share(share_id, reason)` | The single path to end content (§9.1) | Idempotent (no-op if already ended) |
-| `app.claim_burn_share(share_id, claimant…, grace)` | Burn claim ([03 §5.3](03-security-and-network-design.md#53-atomic-claim)) | Exactly-one winner |
+| `app.claim_burn_share(share_id, claimant…, grace)` | Burn claim ([03 §5.3](03-security-and-network-design.md#53-atomic-claim)). As built: `(share_id, file_id, purpose, user_id, device_id, link_session_hash, link_id, url_ttl, user_agent_family)` returns `(outcome, claim_grace_until, issuance, by_you)` and writes the download row. | Exactly-one winner (T-037: 50 connections, 20 rounds); refuses isolation stricter than READ COMMITTED |
+| `app.confirm_burn_received`, `app.burn_grace` (Phase 3) | "I've got it"; the grace formula | Row-locked; idempotent |
+| `app.janitor_*` (Phase 3, `app_janitor`, definer) | Claim with guard rails, finish (deleted, tombstoned, failed with backoff, dry run), heartbeats, reconcile pages | `SKIP LOCKED`, 2-minute locks |
+| `app.trigger_storage_janitor(mode)`, `app.start_storage_reconcile()` (Phase 3) | Post to the janitor through pg_net with the Vault secret | Several posts at once are safe |
+| `app.admin_release_hold(share, reason, operator)` (Phase 3) | Release a takedown hold (operators only, audited) | — |
+| `app.cleanup_anonymous_users(batch)`, `app.reconcile_storage_usage(batch)`, `app.run_job(name)`, `app.cron_health(require_egress)`, `app.replace_egress_ranges(source, cidrs)` (Phase 3) | Jobs, the job runner, health and the egress loader | `SKIP LOCKED` batches; lock-then-recount |
 | `app.rate_limit_hit(key, limit, window)` | Fixed-window counter using `date_bin` + upsert | Atomic upsert |
 | `app.observe_network(device_id, user_id, keys, asn)` | Upsert spaces, classify, record presence (ending presence on other spaces), record dual-stack links. Returns space IDs and statuses. **Phase 1 as built:** `(device_id, user_id, network_key, key_version, family, egress_source)`: the app passes the result of its egress lookup, never the address. | One transaction. Upserts keyed on unique constraints. |
 | `app.egress_ranges_overlapping(prefix)` (Phase 1) | Egress ranges overlapping an IPv4 /24 or IPv6 /48; refuses longer prefixes, so the client address never reaches the database | Read-only |

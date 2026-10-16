@@ -40,6 +40,10 @@ export const VIEWER_STATES = {
   paused: { title: "Sharing by link is paused", body: "Please try again later." },
   limited: { title: "Too many attempts", body: "Wait a few minutes and try again." },
   failed: { title: "Something went wrong", body: "Check your connection and try again." },
+  // OWNER REVIEW (phase 3 §17.9): burn after download, 410 ALREADY_DOWNLOADED. 09 §8 scenario 8
+  // names the "someone else already downloaded" state but not its words.
+  downloaded: { title: "Someone else already downloaded this", body: "It could be opened only once." },
+  downloadedByYou: { title: "You've already opened this", body: "It could be opened only once, and it's been deleted." },
 } as const;
 
 export const REPORT_CATEGORY_LABELS: Record<ReportCategory, string> = {

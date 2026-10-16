@@ -37,6 +37,14 @@ export function linkExpired(): ApiError {
   return new ApiError(410, "LINK_EXPIRED", "This link has expired or was turned off");
 }
 
+/**
+ * Burn after download (Phase 3, DEC-015): someone already downloaded this share. Only callers who
+ * could have opened it get this; byYou tells the claimant that it was them.
+ */
+export function alreadyDownloaded(byYou: boolean): ApiError {
+  return new ApiError(410, "ALREADY_DOWNLOADED", byYou ? "You've already downloaded this" : "Someone already downloaded this", { byYou });
+}
+
 export type ErrorBody = {
   error: { code: string; message: string; requestId: string; details?: unknown };
 };

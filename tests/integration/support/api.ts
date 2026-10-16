@@ -122,6 +122,13 @@ export class Device {
     return response.body.share as { id: string; scope: string; text: { content: string; version: number } };
   }
 
+  /** A burn-after-download text (Phase 3): needs the free_burn_after_download flag on. */
+  async postBurnText(content = `burn ${randomBytes(4).toString("hex")}`, destination: "network" | "link_only" = "network") {
+    const response = await this.call("POST", "/api/v1/texts", { destination, content, burnAfterDownload: true });
+    if (response.status !== 201) throw new Error(`burn text post failed: ${response.status} ${response.text}`);
+    return response.body.share as { id: string; scope: string; text: { content: string; version: number } | null; burn: Json };
+  }
+
   /** A share link (creator only). Returns the link with its one-time URL and optional code. */
   async createLink(shareId: string, body: { expiresIn?: number; shortCode?: { expiresIn?: number } } = {}) {
     const response = await this.call("POST", `/api/v1/shares/${shareId}/links`, body);
@@ -149,10 +156,12 @@ export class Device {
     type = "application/octet-stream",
     declaredSize = bytes.length,
     destination: "network" | "link_only" = "network",
+    extra: Record<string, unknown> = {},
   ) {
     const init = await this.call("POST", "/api/v1/shares", {
       destination,
       files: [{ name, size: declaredSize, type }],
+      ...extra,
     });
     if (init.status !== 201) throw new Error(`upload init failed: ${init.status} ${init.text}`);
     const upload = init.body.uploads[0] as { fileId: string; url: string; headers: Record<string, string> };
@@ -197,8 +206,8 @@ export class Viewer {
     return this.call("GET", `/api/v1/links/${linkId}/content`);
   }
 
-  fileUrl(linkId: string, fileId: string, kind: "download-url" | "preview-url" = "download-url") {
-    return this.call("POST", `/api/v1/links/${linkId}/files/${fileId}/${kind}`, {});
+  fileUrl(linkId: string, fileId: string, kind: "download-url" | "preview-url" = "download-url", body: Record<string, unknown> = {}) {
+    return this.call("POST", `/api/v1/links/${linkId}/files/${fileId}/${kind}`, body);
   }
 
   resolve(code: string, turnstileToken?: string) {

@@ -16,6 +16,7 @@ import { createLinkResponse, regenerateCodeResponse, type CreatedLinkDto, type S
 import { EXPIRY_LABELS, FREE_LIMITS } from "@/lib/shared/plans";
 import { ShareQr } from "../qr/share-qr";
 import { expiresIn } from "../local/format";
+import { BURN } from "../burn/copy";
 import { CODE_HINT, LINK_WARNING, QR_WARNING, REMOTE_BLOCKED } from "./copy";
 
 /**
@@ -144,6 +145,11 @@ export function ShareLinkDialog({ share, open, onOpenChange }: { share: ShareDto
           <DialogTitle>Share by link</DialogTitle>
           <DialogDescription>{LINK_WARNING}</DialogDescription>
         </DialogHeader>
+        {share.burn && (
+          <p className="text-sm text-destructive" data-testid="burn-link-warning">
+            {BURN.linkWarning}
+          </p>
+        )}
 
         {created ? (
           <div className="space-y-3" data-testid="created-link">

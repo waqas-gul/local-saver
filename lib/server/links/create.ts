@@ -10,7 +10,7 @@ import { getDb } from "../db/client";
 import { resolveEntitlements, type Entitlements } from "../entitlements/plans";
 import type { Env } from "../env";
 import { assertRemoteLinksEnabled } from "../flags";
-import { ApiError, notFound } from "../http/errors";
+import { alreadyDownloaded, ApiError, notFound } from "../http/errors";
 import type { NetworkView } from "../network/current";
 import { assertNotRestricted } from "../policy/posting";
 import { enforceRateLimit } from "../ratelimit/limits";
@@ -62,6 +62,8 @@ export async function createLink(
   const peppers = requirePeppers(env, wantsCode);
   const share = await requireOwnShare(caller, network, shareId);
   await assertNotRestricted(caller);
+  // A claimed burn share is already gone for everyone else (phase 3 §17.8).
+  if (share.status === "claimed") throw alreadyDownloaded(false);
   if (share.status !== "active") throw new ApiError(409, "UPLOAD_INCOMPLETE", "Links can be created once the upload has finished");
 
   const entitlements = resolveEntitlements(caller.principal);

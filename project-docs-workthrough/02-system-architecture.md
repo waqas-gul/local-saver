@@ -456,7 +456,12 @@ Policies live on `realtime.messages` and call a `SECURITY DEFINER` helper, `app_
 | 2 | `POST /api/v1/reports` | Abuse report | Anyone (Turnstile) |
 | 2 | *(no HTTP endpoint)* `app.admin_block_share()` / `app.admin_block_link()` SQL functions, run from the MFA-protected Supabase dashboard per the takedown runbook | Takedown | Operator |
 | 4 | `POST /api/v1/admin/shares/{shareId}/block` · `…/links/{linkId}/block` (optional web admin) | Takedown UI | Allow-listed operator account with MFA |
-| 3 | `POST /api/v1/shares/{shareId}/confirm-received` | Claimant ends the burn grace window early | Claimant |
+| 3 | `POST /api/v1/shares/{shareId}/confirm-received` | Claimant ends the burn grace window early (as built: `204`, also when repeated; anyone else `404`) | Claimant |
+| 3 | `POST /api/v1/links/{linkId}/confirm-received` (added, C-7) | The same for a link-viewer claimant | Viewer claimant |
+| 3 | `POST /api/v1/shares/{shareId}/reveal` · `POST /api/v1/links/{linkId}/reveal` (added, C-7) | Reveal a burn text, which is the claim; `{ "confirm": true }` | Device that can see it · grant holder |
+| 3 | `GET /api/v1/me/entitlements` (added, C-7; Phase 4 extends it) | What this device may use now (`burnAfterDownload`) | Device |
+| 3 | `GET /api/v1/health/cron` | Job health for the external uptime monitor; `503` when degraded (D-5) | Anyone |
+| 3 | Download-url bodies `{ "confirm": true }`; `burnAfterDownload` on `POST /shares` and `POST /texts` | Burn claims and the entitlement gate ([phase 3 §18](phases/phase-3-expiry-one-time-download.md#18-implementation-2026-10-16)) | As before |
 | 4 | `POST /api/v1/rooms` · `GET /api/v1/rooms` · `GET · PATCH · DELETE /api/v1/rooms/{roomId}` | Private rooms: create · list mine · details · settings · delete | Pro user · member · member · owner · owner |
 | 4 | `GET /api/v1/rooms/{roomId}/members` · `DELETE …/members/{userId}` | List · remove member or leave | Member · owner/self |
 | 4 | `POST /api/v1/rooms/{roomId}/invites` · `POST /api/v1/invites/{inviteId}/accept` | QR pairing / invite link into a private room | Owner · invitee |

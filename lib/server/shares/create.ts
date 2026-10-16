@@ -18,6 +18,7 @@ import { riskFlags } from "../security/file-risk";
 import { sanitizeFilename } from "../security/filenames";
 import { objectKey, storedContentType } from "../storage/keys";
 import { presignPut, UPLOAD_URL_TTL_SECONDS, type UploadHeaders } from "../storage/s3";
+import { burnSnapshot } from "./burn";
 import { loadShareDto } from "./dto";
 import { resolveExpiry } from "./expiry";
 
@@ -26,6 +27,7 @@ import { resolveExpiry } from "./expiry";
  * pending_upload, and return one presigned PUT per file with the headers that are signed.
  * Single PUT only (≤ 100 MB, DEC-026). The destination is this network or Link only (DEC-033);
  * link-only files must pass the remote file policy, by name here and by content at completion.
+ * burnAfterDownload is entitlement-gated (phase 3 §17.10, Q-008); the snapshot records the grant.
  */
 
 const UPLOAD_DEADLINE = "2 hours"; // completion deadline (04 §7.2)
@@ -122,7 +124,7 @@ async function replay(caller: Caller, env: Env, keyHash: Buffer): Promise<Create
   const shareId = (stored?.response as { shareId?: string } | undefined)?.shareId;
   if (!shareId) return null;
   // Presigned URLs are never stored; a replay gets fresh ones for files still pending.
-  return { share: await loadShareDto(getDb(), shareId, caller.principal.userId), uploads: await uploadTargets(env, shareId) };
+  return { share: await loadShareDto(getDb(), shareId, caller.principal.userId, caller.device.id), uploads: await uploadTargets(env, shareId) };
 }
 
 export async function createFileShare(
@@ -145,6 +147,8 @@ export async function createFileShare(
   }
 
   const entitlements = resolveEntitlements(caller.principal);
+  const snapshot = await burnSnapshot(entitlements, env, body.burnAfterDownload);
+  const burn = body.burnAfterDownload === true;
   const { limits } = entitlements;
   if (body.files.length > limits.maxFilesPerShare) {
     throw new ApiError(413, "TOO_MANY_FILES", "Too many files in one share", { maxFiles: limits.maxFilesPerShare });
@@ -194,7 +198,8 @@ export async function createFileShare(
           expires_at: sql<Date>`now() + make_interval(secs => ${expiry.seconds})`,
           file_count: files.length,
           total_bytes: String(totalBytes),
-          entitlement_snapshot: JSON.stringify(entitlements),
+          burn_after_download: burn,
+          entitlement_snapshot: JSON.stringify(snapshot),
         })
         .returning("id")
         .executeTakeFirstOrThrow();
@@ -243,7 +248,7 @@ export async function createFileShare(
         networkSpaceId: spaceId,
         targetType: "share",
         targetId: share.id,
-        metadata: { kind: "files", scope: body.destination, fileCount: files.length, totalBytes },
+        metadata: { kind: "files", scope: body.destination, fileCount: files.length, totalBytes, ...(burn ? { burn } : {}) },
       });
       if (keyHash) {
         await trx
@@ -268,7 +273,7 @@ export async function createFileShare(
   }
 
   return {
-    share: await loadShareDto(getDb(), shareId, caller.principal.userId),
+    share: await loadShareDto(getDb(), shareId, caller.principal.userId, caller.device.id),
     uploads: await uploadTargets(env, shareId),
   };
 }

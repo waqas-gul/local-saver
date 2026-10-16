@@ -134,8 +134,8 @@ flowchart LR
 - [ ] One bucket per environment. Location hint per Q-016.
 - [ ] Public access **off**. `r2.dev` **off**. No custom domain.
 - [ ] CORS per environment: exact app origins; `PUT`, `GET`, `HEAD`; headers `content-type`, `content-disposition`, `cache-control`, `if-none-match` (write-once uploads, DV1-18); expose `ETag`; max age 3600 s.
-- [ ] Lifecycle rules: `d7/` 8 days, `d30/` 31 days, `d90/` 91 days, abort incomplete multipart uploads after 1 day, no rule for `ws/`.
-- [ ] API tokens: `web-app` and `janitor` (Object Read & Write, scoped to the bucket). No admin tokens in runtime environments.
+- [ ] Lifecycle rules: `d7/` 8 days, `d30/` 31 days, `d90/` 91 days, abort incomplete multipart uploads after 1 day, no rule for `ws/` or `hold/` (legal-hold copies, Phase 3).
+- [ ] API tokens: `web-app` and `janitor` (Object Read & Write, "Apply to specific buckets only": this bucket). No admin tokens in runtime environments. An expiry date matching the 90-day rotation. Check that each token gets a 403 on another bucket (RISK-037).
 - [ ] Usage notifications (storage growth, operations).
 - [ ] CORS and lifecycle JSON stored in `infra/r2/` and applied from it, so the configuration is reproducible.
 
@@ -176,16 +176,20 @@ Every command of both jobs passes locally (2026-10-15). The GitHub remote exists
 | Signal | Source | Alert when |
 |---|---|---|
 | Uptime | External monitor on `/api/v1/health` | 2 consecutive failures |
-| Cron heartbeat | `/api/v1/health/cron` | Stale > 10 min |
+| Cron heartbeat | `/api/v1/health/cron` (built in Phase 3: `heartbeat`, plus the checks below; [monitoring runbook](runbooks/monitoring.md)) | Stale > 10 min. **Delivery (D-5):** an external uptime monitor emails **[OWNER]**. Not configured yet: nothing alerts. |
 | Server errors | Error monitoring and logs | 5xx rate > 1% over 5 min |
-| Janitor backlog | `object_deletions` due rows / oldest age | > 1,000 rows or oldest > 1 h |
-| Janitor failures | `attempts ≥ 5` | Any |
-| Storage drift | `reconcile-storage-usage` output | Any correction > 1 GB |
+| Janitor backlog | `object_deletions` due rows / oldest age (`/health/cron` `janitorBacklog`) | > 1,000 rows or oldest > 1 h; or rows due with no janitor run for 5 min (`stalled`) |
+| Janitor failures | `attempts ≥ 5`, or a guard refusal (`janitorFailures`; logs `janitor.failing`, `janitor.guard_refused`) | Any |
+| Janitor volume | Deletions in 24 h (`janitorVolume`) | Above `janitor_daily_volume_alert` (10,000) |
+| Burn finalize | Claimed shares past grace (`burnFinalize`) | > 10 min late |
+| Reconciliation | Weekly run (`reconcile`) | No finished run for 8 days, or one open 24 h |
+| Job failures | `app.job_heartbeats` (`jobs`) | A job's last run failed |
+| Storage drift | `reconcile-storage-usage` output (`storageDrift`; audit `storage.drift_corrected`) | Any unexplained drift (> max(1 MiB, 0.1 %)); error above 1 GB |
 | Brute-force signals | Aggregated code, password and unlock failures | 10× baseline |
 | Origin-lock rejections | Logs | > 100 per 5 min |
 | Network `unavailable` rate | Logs | > 5% of observations (proxy misconfiguration) |
 | Network status flips | `network.status_changed` audit events | Spike in spaces becoming `shared_egress` or `too_large` (classification drift or abuse) |
-| Egress lists stale | `network.egress_list_stale` error log (local sharing is off everywhere) | Any; reload per the [runbook](runbooks/egress-lists.md) |
+| Egress lists stale | `network.egress_list_stale` error log (local sharing is off everywhere); `/health/cron` `egressLists: stale` after 3 days (Phase 3) | Any; reload per the [runbook](runbooks/egress-lists.md) |
 | Abuse reports | `abuse_reports`; the warn log event `abuse.report_received` (Phase 2, IDs and category only; `urgent: true` for child safety) | Every new report. **Not built:** Phase 2 delivers no alert to anyone (owner decision 2026-10-16); the channel and the operator are future requirements (Q-022). |
 | Code guessing (Phase 2) | Log events `code.resolve_failures`, `code.resolve_blocked`, `code.resolve_failure_spike` (1,000 failures in 10 minutes) | Any spike; consider `short_codes_enabled` off ([runbook](runbooks/kill-switches.md)) |
 | Link unlock attempts (Phase 2) | Log event `link.unlock_rate_limited` | 10× baseline |
@@ -234,7 +238,11 @@ Phase 1 reads these on the server at request time and the root layout passes the
 | `BILLING_*` (Phase 4) | Billing provider credentials and webhook secret |
 | `NEXT_SERVER_ACTIONS_ENCRYPTION_KEY` | Only for multi-instance deployments |
 
-Edge Function secrets: `JANITOR_TRIGGER_SECRET`, janitor R2 credentials, janitor database URL.
+Edge Function secrets (Phase 3, `storage-janitor`; [janitor runbook](runbooks/janitor.md) §2): `JANITOR_DATABASE_URL` (`app_janitor`, Supavisor transaction mode), `JANITOR_TRIGGER_SECRET` (`JANITOR_TRIGGER_SECRET_PREVIOUS` during a rotation), `JANITOR_S3_ENDPOINT`, `JANITOR_S3_BUCKET`, `JANITOR_S3_ACCESS_KEY_ID`, `JANITOR_S3_SECRET_ACCESS_KEY`, `JANITOR_DRY_RUN`. The function reads only these names, never the injected `SUPABASE_*` secrets. Supabase still injects them, `SUPABASE_DB_URL` (user `postgres`) included, and the runtime can't remove them (RISK-036).
+
+Supabase Vault (Phase 3): `storage_janitor_url` and `storage_janitor_secret`, created per environment outside migrations (locally by `supabase/seed.sql`).
+
+GitHub (Phase 3, egress refresh): repository variable `EGRESS_REFRESH_ENABLED`; environment secret `EGRESS_LOADER_DATABASE_URL` (`app_egress_loader`) in `staging` and `production`.
 
 All variables are validated with zod at boot (`lib/server/env.ts`, called from `instrumentation.ts`). `.env.example` lists names only, never values. Empty values count as unset.
 
@@ -261,11 +269,12 @@ All variables are validated with zod at boot (`lib/server/env.ts`, called from `
 | [Shared-egress lists](runbooks/egress-lists.md) (written) | 1 |
 | [Abuse report triage and takedown](runbooks/takedown.md) (written; not rehearsed) | 2 |
 | [Kill switch usage](runbooks/kill-switches.md) (written) | 2 |
-| Janitor backlog / failed deletions | 3 |
-| Cron failure / heartbeat stale | 3 |
-| Incident response (security and availability) | 3 (before public beta) |
-| Secret rotation (each secret in [03 §12](03-security-and-network-design.md#12-secrets-and-key-management)) | 3 |
-| Database restore drill | 3 |
+| [Janitor backlog / failed deletions](runbooks/janitor.md) (written; not run on staging) | 3 |
+| [Cron failure / heartbeat stale](runbooks/cron.md) (written) | 3 |
+| [Job health monitoring and alerts](runbooks/monitoring.md) (written; no monitor configured) | 3 |
+| [Incident response (security and availability)](runbooks/incident.md) (written; roles `[OWNER]`) | 3 (before public beta) |
+| [Secret rotation](runbooks/secret-rotation.md) (each secret in [03 §12](03-security-and-network-design.md#12-secrets-and-key-management); written, not rehearsed) | 3 |
+| [Database restore drill](runbooks/restore-drill.md) (written; never run, no hosted project) | 3 |
 | Billing webhook replay and reconciliation | 4 |
 | Account and data deletion requests | 4 |
 | Workspace suspension and data retention notices | 5 |

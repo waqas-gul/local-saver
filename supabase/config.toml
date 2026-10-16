@@ -388,6 +388,13 @@ deno_version = 2
 # [edge_runtime.secrets]
 # secret_key = "env(SECRET_VALUE)"
 
+# Phase 3 storage janitor (phase 3 §17.5). Called only by pg_cron through pg_net with a shared
+# secret, which the function checks itself; no Supabase JWT is involved. Its settings come from
+# supabase/functions/.env locally (`pnpm stack:start`) and from function secrets when deployed.
+[functions.storage-janitor]
+enabled = true
+verify_jwt = false
+
 [analytics]
 enabled = true
 port = 54327

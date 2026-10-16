@@ -1,16 +1,21 @@
 #!/usr/bin/env node
 /**
- * Local stack helper (Phase 1, P1-01).
+ * Local stack helper (Phase 1, P1-01; Phase 3 P3-05).
  *
- *   node scripts/local-stack.cjs storage-start   start RustFS (the local R2 stand-in) and create the bucket
+ *   node scripts/local-stack.cjs prepare         write supabase/functions/.env (Edge Function settings)
+ *   node scripts/local-stack.cjs storage-start   start RustFS (the local R2 stand-in), create the bucket and
+ *                                                attach it to the Supabase network for the janitor
  *   node scripts/local-stack.cjs storage-stop    remove the RustFS container
  *   node scripts/local-stack.cjs env             print a .env.local for the local stack
  *
- * Supabase itself is started with `pnpm stack:start` (Supabase CLI). Every value here is a
- * local-only default; none of them is valid outside this machine or CI.
+ * Supabase itself is started with `pnpm stack:start` (Supabase CLI), which also serves the Edge
+ * Functions in supabase/functions. Every value here is a local-only default; none of them is
+ * valid outside this machine or CI.
  * CommonJS so that Node, Vitest and the Playwright config can all load it.
  */
 const { execFileSync } = require("node:child_process");
+const { writeFileSync } = require("node:fs");
+const { join } = require("node:path");
 
 const STORAGE = {
   image: "rustfs/rustfs:1.0.1",
@@ -21,6 +26,10 @@ const STORAGE = {
   bucket: "local-saver-dev",
   // Browser uploads come from these app origins (dev server, e2e server, integration server).
   corsOrigins: ["http://localhost:3000", "http://127.0.0.1:3000", "http://127.0.0.1:3102", "http://127.0.0.1:3200"],
+  // The Supabase CLI's Docker network, so the Edge Functions reach RustFS by this name. The CLI
+  // adds no host alias on Linux, so host.docker.internal would fail on CI (phase 3 §18.2).
+  network: "supabase_network_local-saver",
+  networkAlias: "local-saver-s3",
 };
 
 const LOCAL = {
@@ -29,6 +38,23 @@ const LOCAL = {
   networkKeySecret: "local-only-network-key-secret-0000000000000001",
   linkPepper: "local-only-link-pepper-000000000000000000000001",
   codePepper: "local-only-code-pepper-000000000000000000000001",
+  // Phase 3: the janitor and egress-loader roles (passwords set in supabase/seed.sql).
+  janitorDatabaseUrl: "postgresql://app_janitor:app-janitor-local-only@127.0.0.1:54322/postgres",
+  egressLoaderDatabaseUrl: "postgresql://app_egress_loader:app-egress-loader-local-only@127.0.0.1:54322/postgres",
+  // Must match the storage_janitor_secret Vault entry in supabase/seed.sql.
+  janitorTriggerSecret: "local-only-janitor-trigger-secret-0000000000000001",
+  janitorUrl: "http://127.0.0.1:54321/functions/v1/storage-janitor",
+};
+
+/** Settings for the storage-janitor function, as it sees the stack from inside Docker. */
+const FUNCTIONS_ENV = {
+  JANITOR_DATABASE_URL: "postgresql://app_janitor:app-janitor-local-only@db:5432/postgres",
+  JANITOR_TRIGGER_SECRET: LOCAL.janitorTriggerSecret,
+  JANITOR_S3_ENDPOINT: `http://${STORAGE.networkAlias}:9000`,
+  JANITOR_S3_BUCKET: STORAGE.bucket,
+  JANITOR_S3_ACCESS_KEY_ID: STORAGE.accessKeyId,
+  JANITOR_S3_SECRET_ACCESS_KEY: STORAGE.secretAccessKey,
+  JANITOR_DRY_RUN: "false",
 };
 
 function docker(args) {
@@ -87,6 +113,29 @@ async function ensureBucket() {
   );
 }
 
+/** supabase/functions/.env (git-ignored): read by the CLI when `supabase start` serves functions. */
+function prepare() {
+  const file = join(__dirname, "..", "supabase", "functions", ".env");
+  const lines = [
+    "# Written by `pnpm stack:start` for the local stack only. Do not use these values anywhere else.",
+    ...Object.entries(FUNCTIONS_ENV).map(([name, value]) => `${name}=${value}`),
+  ];
+  writeFileSync(file, `${lines.join("\n")}\n`);
+  console.log(`functions env written: ${file}`);
+}
+
+/** Attach RustFS to the Supabase network (idempotent; the network is recreated by each `supabase start`). */
+function connectStorageNetwork() {
+  try {
+    docker(["network", "connect", "--alias", STORAGE.networkAlias, STORAGE.network, STORAGE.container]);
+  } catch (error) {
+    const message = String(error.stderr ?? error.message);
+    if (!/already exists|already attached|endpoint with name/i.test(message)) {
+      console.warn(`RustFS not attached to ${STORAGE.network} (start Supabase first): ${message.trim()}`);
+    }
+  }
+}
+
 async function storageStart() {
   const existing = docker(["ps", "-a", "--filter", `name=^${STORAGE.container}$`, "--format", "{{.State}}"]);
   if (!existing) {
@@ -102,6 +151,7 @@ async function storageStart() {
   for (let attempt = 0; attempt < 30; attempt++) {
     try {
       await ensureBucket();
+      connectStorageNetwork();
       console.log(`storage ready: ${STORAGE.endpoint}/${STORAGE.bucket}`);
       return;
     } catch {
@@ -148,13 +198,13 @@ function printEnv() {
   console.log(lines.join("\n"));
 }
 
-module.exports = { STORAGE, LOCAL, supabaseStatus, ensureBucket };
+module.exports = { STORAGE, LOCAL, FUNCTIONS_ENV, supabaseStatus, ensureBucket };
 
 if (require.main === module) {
   const command = process.argv[2];
-  const run = { "storage-start": storageStart, "storage-stop": storageStop, env: printEnv }[command];
+  const run = { prepare, "storage-start": storageStart, "storage-stop": storageStop, env: printEnv }[command];
   if (!run) {
-    console.error("usage: node scripts/local-stack.cjs storage-start|storage-stop|env");
+    console.error("usage: node scripts/local-stack.cjs prepare|storage-start|storage-stop|env");
     process.exit(2);
   }
   Promise.resolve(run()).catch((error) => {

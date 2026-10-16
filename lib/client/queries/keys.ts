@@ -13,6 +13,8 @@ export const queryKeys = {
   previews: () => ["preview"] as const,
   preview: (fileId: string) => ["preview", fileId] as const,
   myShares: () => ["me", "shares"] as const,
+  /** Phase 3: what this device may use (burn after download); not network-scoped. */
+  entitlements: () => ["me", "entitlements"] as const,
   /** Phase 2: the creator's links for one share (never their secrets). */
   shareLinks: (shareId: string) => ["me", "links", shareId] as const,
   /** Phase 2: everything a link viewer holds for one link (removed on 404/410, rule 4). */

@@ -226,6 +226,34 @@ IDs are stable. Phase documents reference them.
 | Report copy promises no review, since no alert reaches a person (owner decision 2026-10-16) | `tests/component/remote-ui.test.tsx` (report dialog and report page) |
 | Real phone cameras and keyboards, takedown rehearsal, real Turnstile and R2 | Manual: [phase 2 procedure](phases/phase-2-manual-verification.md) (not run) |
 
+### 4.13 Phase 3 test map (as built, 2026-10-16)
+
+New IDs T3-01 … T3-12 are from [phase 3 §17.15](phases/phase-3-expiry-one-time-download.md#1715-test-plan). Results: [phase 3 §18.8](phases/phase-3-expiry-one-time-download.md#188-tests).
+
+| Tests | Where |
+|---|---|
+| T-037 (50 claims → one winner): SQL level with 50 connections, ×20; API level with 50 devices; mixed devices and viewers; a mutation check at both levels; isolation refused | `tests/integration/burn-concurrency.test.ts` |
+| T-038 (claimant retries ≤ 3 per file, others 410, after grace 410, finalize), T3-01 (10 parallel retries → 3 URLs) | `tests/integration/burn.test.ts`, `burn-concurrency.test.ts`, `supabase/tests/phase3_burn.test.sql`, E2E `local-burn.spec.ts` |
+| T-039 (creator never claims; downloads until consumed, D-7) | `burn.test.ts`, pgTAP, E2E |
+| T-040 (text Reveal is the claim) | `burn.test.ts`, pgTAP, `tests/component/burn-ui.test.tsx`, E2E |
+| T-028 burn part (no previews for burn shares) | `burn.test.ts` |
+| T-043 (guard rails: active and claimed shares, key format; backoff; dry run) | `tests/integration/janitor.test.ts`, `supabase/tests/phase3_janitor.test.sql`, `tests/unit/janitor-core.test.ts` |
+| T-044, T3-08, T3-09 (orphans queued, young and live kept, unknown keys counted, missing objects marked, cursor across invocations) | `janitor.test.ts`, pgTAP |
+| T-045 (anonymous-user cleanup with cascades; suspended users kept, D-9) | `supabase/tests/phase3_retention.test.sql`, `tests/integration/retention.test.ts` |
+| T3-02, T3-03, T3-06 (R2 errors, dropped connections, tombstone failure, five failures → health 503) | `janitor.test.ts` (`tests/integration/support/fault-proxy.ts`) |
+| T3-04, T3-05 (a crashed run's locks; the janitor switched off: access denied, bytes wait) | `janitor.test.ts` |
+| T3-07 (pg_cron stopped: access denied; health 503) | `tests/integration/cron-health.test.ts` |
+| T3-10, T3-11 (a claimed share's lifecycle; deletion after the 5-minute margin; end to end through cron and the function) | `burn.test.ts`, `uploads.test.ts` |
+| T3-12 and AC-3.8 (unfurlers and a page left open never claim) | `burn.test.ts`, E2E |
+| Purge with evidence exclusions (D-3), legal hold and release (D-2) | pgTAP, `retention.test.ts`, `janitor.test.ts` |
+| Legal-hold copies out of the lifecycle rules' reach (RISK-031): the copy, a missing source, the original deleted as R2 would, release deleting both; no lifecycle rule on `hold/` | `janitor.test.ts`, pgTAP, `tests/unit/{janitor-core,s3-fetch,r2-config}.test.ts` |
+| The janitor never uses the injected Supabase secrets (RISK-036): a static scan of `supabase/functions`; the real function with `app_janitor` blocked | `tests/unit/functions-env.test.ts`, `janitor.test.ts` |
+| Storage-usage reconciliation and its race | pgTAP, `retention.test.ts` |
+| Egress loader under `app_egress_loader` (D-4) | `tests/integration/egress-loader.test.ts`, pgTAP |
+| `/health/cron`, `/me/entitlements` | `cron-health.test.ts`, `burn.test.ts`, the IDOR matrix |
+| The deletion tests of Phase 1 after D-1 (the janitor runs, every assertion kept) | `tests/integration/uploads.test.ts` |
+| Real phones, staging soak, chaos with alerts, restore drill | Manual: [phase 3 procedure](phases/phase-3-manual-verification.md) (not run) |
+
 ---
 
 ## 5. IDOR matrix as code

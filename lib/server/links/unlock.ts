@@ -5,10 +5,11 @@ import { IntegrationNotConfiguredError } from "../config/integrations";
 import { getDb } from "../db/client";
 import type { Env } from "../env";
 import { assertRemoteLinksEnabled } from "../flags";
-import { ApiError, linkExpired, linkUnavailable } from "../http/errors";
+import { alreadyDownloaded, ApiError, linkExpired, linkUnavailable } from "../http/errors";
 import { log } from "../log";
 import { requesterKey } from "../network/requester";
 import { enforceRateLimit } from "../ratelimit/limits";
+import { hashSessionToken, readLinkSessionToken } from "./cookies";
 import { accessFor, grantAccess } from "./grants";
 import { isLinkId, verifyLinkSecret } from "./secrets";
 import { issueSession } from "./sessions";
@@ -23,6 +24,9 @@ import { loadViewerContent } from "./viewer";
  * 3. Only once the secret is proven is the link's state revealed: 410 LINK_EXPIRED if it was
  *    revoked, has expired or its share has ended.
  * 4. A viewer session (httpOnly cookie) and a grant of at most 12 hours.
+ *
+ * A claimed burn share (Phase 3) unlocks only for its claimant's session, so a reload of the
+ * share page keeps working during the grace; anyone else learns it was downloaded (410).
  *
  * The secret is never logged, stored or returned. A POST with a JSON body from this origin is the
  * only way in, so link-preview bots that only GET the page change nothing (T-033).
@@ -72,11 +76,25 @@ export async function unlockLink(
     const state = await trx
       .selectFrom("app.share_links as l")
       .innerJoin("app.shares as s", "s.id", "l.share_id")
-      .select(sql<boolean>`l.revoked_at is null and l.expires_at > now() and s.status = 'active' and s.expires_at > now()`.as("live"))
+      .select([
+        sql<boolean>`l.revoked_at is null and l.expires_at > now() and s.expires_at > now()`.as("link_live"),
+        sql<boolean>`s.expires_at > now()`.as("share_live"),
+        sql<boolean>`coalesce(s.claim_grace_until > now(), false)`.as("in_grace"),
+        "s.status",
+        "s.burn_after_download",
+        "s.claimed_link_session_hash",
+      ])
       .where("l.id", "=", row.id)
       .forUpdate()
       .executeTakeFirstOrThrow();
-    if (!state.live) throw linkExpired();
+    if (state.burn_after_download && (state.status === "claimed" || state.status === "consumed") && state.share_live) {
+      const token = readLinkSessionToken(request, env);
+      const isClaimant = token !== null && state.claimed_link_session_hash?.equals(hashSessionToken(token)) === true;
+      if (!(state.status === "claimed" && isClaimant && state.in_grace)) throw alreadyDownloaded(isClaimant);
+      if (!state.link_live) throw linkExpired();
+    } else if (!state.link_live || state.status !== "active") {
+      throw linkExpired();
+    }
     const issued = await issueSession(trx, request, env);
     await grantAccess(trx, issued.hash, row.id, "secret");
     await trx

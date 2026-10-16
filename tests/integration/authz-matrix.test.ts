@@ -2,12 +2,14 @@ import { randomBytes } from "node:crypto";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { adminDb, api, closeAdminDb, Device, newNetwork, PNG_BYTES, turnstilePass, Viewer } from "./support/api";
+import { adminDb, api, closeAdminDb, Device, newNetwork, PNG_BYTES, setFlag, turnstilePass, Viewer } from "./support/api";
 
 /**
  * IDOR matrix as code (09 §5, AC-1.3, Phase 2 T-029). Mirrors 03 §9: the local-mode rows and,
  * from Phase 2, link viewers of this share and of another share.
  * The first test fails if any route or method under app/api/v1 has no entry here.
+ * Phase 3 adds the burn-after-download routes (reveal, confirm-received), /me/entitlements and
+ * /health/cron; the burn rows target burn shares (phase 3 §17.15 "IDOR matrix extended").
  */
 
 type Actor =
@@ -21,7 +23,8 @@ type Actor =
   | "creatorSame" // the creator, on the share's network
   | "creatorOther"; // the creator's second device, on another network
 
-type Entry = Partial<Record<Actor, number>>;
+/** An expected status; a list where the status reflects system state rather than the caller (health). */
+type Entry = Partial<Record<Actor, number | number[]>>;
 
 const MATRIX: Record<string, Entry> = {
   "GET /api/v1/health": { anonymous: 200 },
@@ -85,6 +88,25 @@ const MATRIX: Record<string, Entry> = {
     anonymous: 401, sameNetwork: 201, otherNetwork: 404, leftNetwork: 404, blockedNetwork: 404, linkViewer: 201, otherLinkViewer: 404,
     creatorSame: 201, creatorOther: 201,
   },
+
+  // Phase 3: burn after download. Reveal targets an unclaimed burn text: the first device on its
+  // network claims it; the creator (any network) reads it without claiming (D-7).
+  "POST /api/v1/shares/[shareId]/reveal": {
+    anonymous: 401, sameNetwork: 200, otherNetwork: 404, leftNetwork: 404, blockedNetwork: 404, linkViewer: 401, creatorOther: 200, creatorSame: 200,
+  },
+  // Confirm targets a burn text sameNetwork claimed: only that claimant may end it.
+  "POST /api/v1/shares/[shareId]/confirm-received": {
+    anonymous: 401, sameNetwork: 204, otherNetwork: 404, leftNetwork: 404, blockedNetwork: 404, linkViewer: 401, creatorOther: 404, creatorSame: 404,
+  },
+  "POST /api/v1/links/[linkId]/reveal": {
+    anonymous: 404, sameNetwork: 404, otherNetwork: 404, linkViewer: 200, otherLinkViewer: 404, creatorSame: 404,
+  },
+  "POST /api/v1/links/[linkId]/confirm-received": {
+    anonymous: 404, sameNetwork: 404, otherNetwork: 404, linkViewer: 204, otherLinkViewer: 404, creatorSame: 404,
+  },
+  "GET /api/v1/me/entitlements": { anonymous: 401, sameNetwork: 200, otherNetwork: 200, blockedNetwork: 200, linkViewer: 401, creatorSame: 200 },
+  // No caller identity: an uptime monitor polls it (D-5). Every caller gets the same answer.
+  "GET /api/v1/health/cron": { anonymous: [200, 503], sameNetwork: [200, 503], linkViewer: [200, 503] },
 };
 
 const ACTOR_ORDER: Actor[] = [
@@ -142,6 +164,11 @@ describe("authorization matrix (03 §9: local mode and link viewers)", () => {
     otherLinkSecret: "",
     revocable: "",
     blockedLink: "",
+    // Phase 3: burn texts on the creator's network, and burn link-only texts with links.
+    burnReveal: "",
+    burnConfirm: "",
+    burnLinkReveal: "",
+    burnLinkConfirm: "",
   };
 
   beforeAll(async () => {
@@ -194,6 +221,20 @@ describe("authorization matrix (03 §9: local mode and link viewers)", () => {
     }) as Device;
     await actors.creatorOther.observe();
 
+    // Burn after download (Phase 3): two network texts, one already claimed by sameNetwork, and two
+    // link-only texts whose links linkViewer unlocked, one of them already claimed by linkViewer.
+    await setFlag("free_burn_after_download", true);
+    ids.burnReveal = (await creator.postBurnText("burn to reveal")).id;
+    ids.burnConfirm = (await creator.postBurnText("burn to confirm")).id;
+    expect((await actors.sameNetwork.call("POST", `/api/v1/shares/${ids.burnConfirm}/reveal`, { confirm: true })).status).toBe(200);
+    for (const key of ["burnLinkReveal", "burnLinkConfirm"] as const) {
+      const share = await creator.postBurnText(`burn ${key}`, "link_only");
+      const burnLink = await creator.createLink(share.id);
+      ids[key] = burnLink.id;
+      expect((await viewers.linkViewer.unlock(burnLink.id, burnLink.secret)).status).toBe(200);
+    }
+    expect((await viewers.linkViewer.call("POST", `/api/v1/links/${ids.burnLinkConfirm}/reveal`, { confirm: true })).status).toBe(200);
+
     await actors.leftNetwork.moveTo(newNetwork().ip());
 
     // A blocked network with content (and a link) made before the block.
@@ -206,7 +247,10 @@ describe("authorization matrix (03 §9: local mode and link viewers)", () => {
     await adminDb().query("update app.network_spaces set status = 'blocked' where id = $1", [blockedSpace]);
   });
 
-  afterAll(closeAdminDb);
+  afterAll(async () => {
+    await setFlag("free_burn_after_download", false);
+    await closeAdminDb();
+  });
 
   /** Resource IDs per actor: the blocked-network actor targets the blocked network's content. */
   function params(actor: Actor) {
@@ -234,6 +278,7 @@ describe("authorization matrix (03 §9: local mode and link viewers)", () => {
       return { secret };
     }
     if (route === "POST /api/v1/codes/resolve") return { code: actor === "linkViewer" ? ids.linkCode : "0000000000" };
+    if (route.endsWith("/reveal")) return { confirm: true };
     if (route === "POST /api/v1/reports") {
       const target = isViewer(actor) ? { type: "link", linkId: ids.link } : { type: "share", shareId: params(actor).shareId };
       return { target, category: "spam", turnstileToken: turnstilePass() };
@@ -249,6 +294,12 @@ describe("authorization matrix (03 §9: local mode and link viewers)", () => {
     if (route.includes("/complete")) {
       path = path.replace("[shareId]", ids.pendingShare).replace("[fileId]", ids.pendingFile);
     }
+    if (actor !== "blockedNetwork") {
+      if (route === "POST /api/v1/shares/[shareId]/reveal") path = path.replace("[shareId]", ids.burnReveal);
+      if (route === "POST /api/v1/shares/[shareId]/confirm-received") path = path.replace("[shareId]", ids.burnConfirm);
+      if (route === "POST /api/v1/links/[linkId]/reveal") path = path.replace("[linkId]", ids.burnLinkReveal);
+      if (route === "POST /api/v1/links/[linkId]/confirm-received") path = path.replace("[linkId]", ids.burnLinkConfirm);
+    }
     return path
       .replace("[shareId]", p.shareId)
       .replace("[fileId]", p.fileId)
@@ -259,6 +310,7 @@ describe("authorization matrix (03 §9: local mode and link viewers)", () => {
   for (const [route, expectations] of Object.entries(MATRIX)) {
     it(route, async () => {
       const method = route.split(" ")[0] as string;
+      const seen = new Set<number>();
       for (const actor of ACTOR_ORDER) {
         const expected = expectations[actor];
         if (expected === undefined) continue;
@@ -270,7 +322,13 @@ describe("authorization matrix (03 §9: local mode and link viewers)", () => {
             : isViewer(actor)
               ? await viewers[actor].call(method, path, body)
               : await actors[actor].call(method, path, body);
-        expect(response.status, `${actor}: ${method} ${path} → ${response.text.slice(0, 200)}`).toBe(expected);
+        if (Array.isArray(expected)) {
+          expect(expected, `${actor}: ${method} ${path} → ${response.status}`).toContain(response.status);
+          seen.add(response.status);
+          expect(seen.size, `${route}: every caller gets the same answer`).toBe(1);
+        } else {
+          expect(response.status, `${actor}: ${method} ${path} → ${response.text.slice(0, 200)}`).toBe(expected);
+        }
         // A new code replaces the old one; later rows must use the current code.
         if (route === "POST /api/v1/links/[linkId]/code" && response.status === 200) ids.linkCode = response.body.shortCode.code;
       }

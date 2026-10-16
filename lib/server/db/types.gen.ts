@@ -92,6 +92,7 @@ export interface AppFiles {
   network_space_id: string | null;
   object_deleted_at: Timestamp | null;
   object_key: string;
+  object_missing_at: Timestamp | null;
   original_name: string;
   position: Generated<number>;
   preview_kind: Generated<string>;
@@ -115,6 +116,16 @@ export interface AppIdempotencyKeys {
   key_hash: Buffer;
   response: Json;
   user_id: string;
+}
+
+export interface AppJobHeartbeats {
+  job: string;
+  last_error: string | null;
+  last_failed_at: Timestamp | null;
+  last_result: Generated<Json>;
+  last_started_at: Timestamp | null;
+  last_succeeded_at: Timestamp | null;
+  updated_at: Generated<Timestamp>;
 }
 
 export interface AppLinkGrants {
@@ -166,8 +177,12 @@ export interface AppNetworkSpaces {
 export interface AppObjectDeletions {
   attempts: Generated<number>;
   completed_at: Timestamp | null;
+  hold_copy: string | null;
+  hold_reason: string | null;
   id: Generated<Int8>;
+  last_attempt_at: Timestamp | null;
   last_error: string | null;
+  legal_hold: Generated<boolean>;
   locked_until: Timestamp | null;
   not_before: Generated<Timestamp>;
   object_key: string;
@@ -219,6 +234,12 @@ export interface AppShares {
   billing_subject_id: string;
   billing_subject_type: string;
   burn_after_download: Generated<boolean>;
+  claim_grace_until: Timestamp | null;
+  claimed_at: Timestamp | null;
+  claimed_by_user_id: string | null;
+  claimed_device_id: string | null;
+  claimed_link_id: string | null;
+  claimed_link_session_hash: Buffer | null;
   created_at: Generated<Timestamp>;
   created_by_device_id: string | null;
   created_by_user_id: string | null;
@@ -237,6 +258,16 @@ export interface AppShares {
   title: string | null;
   total_bytes: Generated<Int8>;
   updated_at: Generated<Timestamp>;
+}
+
+export interface AppStorageReconcileRuns {
+  counts: Generated<Json>;
+  finished_at: Timestamp | null;
+  id: Generated<Int8>;
+  last_key: string | null;
+  locked_until: Timestamp | null;
+  started_at: Generated<Timestamp>;
+  status: Generated<string>;
 }
 
 export interface AppStorageReservations {
@@ -286,6 +317,7 @@ export interface DB {
   "app.downloads": AppDownloads;
   "app.files": AppFiles;
   "app.idempotency_keys": AppIdempotencyKeys;
+  "app.job_heartbeats": AppJobHeartbeats;
   "app.link_grants": AppLinkGrants;
   "app.link_sessions": AppLinkSessions;
   "app.network_egress_ranges": AppNetworkEgressRanges;
@@ -296,6 +328,7 @@ export interface DB {
   "app.runtime_flags": AppRuntimeFlags;
   "app.share_links": AppShareLinks;
   "app.shares": AppShares;
+  "app.storage_reconcile_runs": AppStorageReconcileRuns;
   "app.storage_reservations": AppStorageReservations;
   "app.storage_usage": AppStorageUsage;
   "app.text_items": AppTextItems;

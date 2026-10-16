@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import pg from "pg";
 import { afterAll, describe, expect, it } from "vitest";
 import { LOCAL } from "../../scripts/local-stack.cjs";
 import { adminDb, closeAdminDb, Device } from "./support/api";
@@ -10,12 +11,12 @@ import { adminDb, closeAdminDb, Device } from "./support/api";
 
 afterAll(closeAdminDb);
 
-function load(apple: string, tor: string) {
+function load(apple: string, tor: string, databaseUrl: string = LOCAL.adminDatabaseUrl) {
   const dir = mkdtempSync(join(tmpdir(), "egress-"));
   writeFileSync(join(dir, "apple.csv"), apple);
   writeFileSync(join(dir, "tor.txt"), tor);
   return execFileSync(process.execPath, ["scripts/load-egress-ranges.cjs", "--apple", join(dir, "apple.csv"), "--tor", join(dir, "tor.txt")], {
-    env: { ...process.env, LOADER_DATABASE_URL: LOCAL.adminDatabaseUrl },
+    env: { ...process.env, LOADER_DATABASE_URL: databaseUrl },
     encoding: "utf8",
   });
 }
@@ -53,6 +54,26 @@ describe("load-egress-ranges", () => {
 
   it("refuses to empty a list when a download or file has nothing usable", () => {
     expect(() => load("garbage\n", "198.51.100.77\n")).toThrow();
+  });
+
+  it("runs as the least-privilege app_egress_loader role, which can't touch tables directly (D-4)", async () => {
+    const output = load("192.0.2.0/27,GB,GB-EN,London,\n", "198.51.100.78\n", LOCAL.egressLoaderDatabaseUrl);
+    expect(output).toContain("private_relay: 1 ranges listed, 1 rows after merging, 0 lines skipped");
+    const { rows } = await adminDb().query("select value from app.runtime_flags where key = 'egress_ranges'");
+    expect(rows[0].value.rows).toEqual({ private_relay: 1, tor: 1 });
+    expect(Date.now() - Date.parse(rows[0].value.loadedAt)).toBeLessThan(60_000);
+
+    const role = new pg.Client({ connectionString: LOCAL.egressLoaderDatabaseUrl });
+    await role.connect();
+    try {
+      await expect(role.query("delete from app.network_egress_ranges")).rejects.toThrow(/permission denied/);
+      await expect(role.query("update app.runtime_flags set enabled = false where key = 'local_sharing_enabled'")).rejects.toThrow(
+        /permission denied/,
+      );
+      await expect(role.query("select app.replace_egress_ranges('tor', array[]::cidr[])")).rejects.toThrow(/refusing to empty/);
+    } finally {
+      await role.end();
+    }
   });
 
   afterAll(async () => {

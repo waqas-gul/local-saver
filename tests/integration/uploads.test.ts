@@ -3,8 +3,14 @@ import pg from "pg";
 import { afterAll, describe, expect, it } from "vitest";
 import { LOCAL } from "../../scripts/local-stack.cjs";
 import { adminDb, closeAdminDb, Device, newNetwork, PNG_BYTES, setFlag, stack } from "./support/api";
+import { drainJanitor, setCronJobActive } from "./support/janitor";
 
-/** Uploads, storage and downloads (09 §4.4–§4.5). Storage is RustFS standing in for R2 (DV1-4). */
+/**
+ * Uploads, storage and downloads (09 §4.4–§4.5). Storage is RustFS standing in for R2 (DV1-4).
+ * Since Phase 3 the storage janitor is the only thing that deletes or tombstones objects (D-1):
+ * access ends at once, and these tests run the janitor (the real Edge Function) before checking
+ * storage. Every Phase 1 assertion about what storage ends up holding is kept.
+ */
 
 const MB = 1024 * 1024;
 
@@ -45,15 +51,6 @@ async function outboxRow(key: string) {
     [key],
   );
   return rows[0] as { completed_at: Date | null; tombstoned_at: Date | null; not_before: Date } | undefined;
-}
-
-async function waitFor(condition: () => Promise<boolean>, timeoutMs = 10_000): Promise<boolean> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (await condition()) return true;
-    await new Promise((resolve) => setTimeout(resolve, 200));
-  }
-  return condition();
 }
 
 function objectKeyOf(url: string): string {
@@ -303,7 +300,7 @@ describe("lying clients (RISK-010)", () => {
     const complete = await a.call("POST", `/api/v1/shares/${shareId}/files/${upload.fileId}/complete`, {});
     expect(complete.status).toBe(422);
     expect(complete.body.error).toMatchObject({ code: "UPLOAD_REJECTED", details: { reason: "metadata_mismatch" } });
-    expect(await contentGone(objectKeyOf(upload.url))).toBe(true);
+    expect(await drainJanitor(() => contentGone(objectKeyOf(upload.url)))).toBe(true);
   });
 
   it("completion still rejects a wrong-sized object: deleted, reservation released, share failed (T-020)", async () => {
@@ -318,7 +315,7 @@ describe("lying clients (RISK-010)", () => {
     expect(complete.status).toBe(422);
     expect(complete.body.error).toMatchObject({ code: "UPLOAD_REJECTED", details: { reason: "size_mismatch" } });
 
-    expect(await contentGone(objectKeyOf(upload.url))).toBe(true);
+    expect(await drainJanitor(() => contentGone(objectKeyOf(upload.url)))).toBe(true);
     const usage = await adminDb().query(
       "select bytes_reserved, bytes_committed from app.storage_usage where subject_id = $1",
       [a.userId],
@@ -391,13 +388,17 @@ describe("previews (T-028, preview part)", () => {
 });
 
 describe("deleting a file share", () => {
-  it("removes the content at once and holds the key until the upload URL has expired", async () => {
+  it("ends access at once; the janitor removes the content and holds the key until the upload URL has expired", async () => {
     const a = await Device.create(newNetwork().ip());
     const { init, upload } = await a.uploadFile("bye.txt", new TextEncoder().encode("bye"), "text/plain");
     const key = objectKeyOf(upload.url);
     expect(await storedObject(key)).toEqual({ size: 3, tombstone: false });
 
     expect((await a.call("DELETE", `/api/v1/shares/${init.body.share.id}`)).status).toBe(204);
+    // Access ends with the request (D-1); the bytes go on the janitor's next run.
+    expect((await a.call("GET", `/api/v1/shares/${init.body.share.id}`)).status).toBe(404);
+    expect((await a.call("POST", `/api/v1/files/${upload.fileId}/download-url`, {})).status).toBe(404);
+    expect(await drainJanitor(async () => (await outboxRow(key))?.tombstoned_at != null)).toBe(true);
     expect(await storedObject(key)).toEqual({ size: 0, tombstone: true });
     const outbox = await outboxRow(key);
     expect(outbox?.completed_at).toBeNull();
@@ -417,6 +418,7 @@ describe("deleting a file share", () => {
     await adminDb().query("update app.files set upload_url_expires_at = now() - interval '10 minutes' where id = $1", [upload.fileId]);
 
     expect((await a.call("DELETE", `/api/v1/shares/${init.body.share.id}`)).status).toBe(204);
+    expect(await drainJanitor(async () => (await outboxRow(key))?.completed_at != null)).toBe(true);
     expect(await storedObject(key)).toBeNull();
     expect((await outboxRow(key))?.completed_at).not.toBeNull();
   });
@@ -439,6 +441,9 @@ describe("upload URLs after a share ends (review M1 residual)", () => {
     const { init, upload } = await a.uploadFile("gone.txt", new TextEncoder().encode("gone"), "text/plain");
     const key = objectKeyOf(upload.url);
     expect((await a.call("DELETE", `/api/v1/shares/${init.body.share.id}`)).status).toBe(204);
+    // Before and after the janitor's tombstone the key stays taken, so the write-once URL fails.
+    expect((await fetch(upload.url, { method: "PUT", headers: upload.headers, body: Buffer.from("evil") })).status).toBe(412);
+    expect(await drainJanitor(async () => (await outboxRow(key))?.tombstoned_at != null)).toBe(true);
 
     const again = await fetch(upload.url, { method: "PUT", headers: upload.headers, body: Buffer.from("evil") });
     expect(again.status).toBe(412);
@@ -447,10 +452,11 @@ describe("upload URLs after a share ends (review M1 residual)", () => {
     expect(complete.status).toBe(404);
   });
 
-  it("deleting a share before its bytes arrive (cancel) blocks its upload URL", async () => {
+  it("deleting a share before its bytes arrive (cancel) blocks its upload URL once the janitor has run", async () => {
     const a = await Device.create(newNetwork().ip());
     const { shareId, upload } = await initOne(a);
     expect((await a.call("DELETE", `/api/v1/shares/${shareId}`)).status).toBe(204);
+    expect(await drainJanitor(async () => (await outboxRow(objectKeyOf(upload.url)))?.tombstoned_at != null)).toBe(true);
 
     const put = await fetch(upload.url, { method: "PUT", headers: upload.headers, body: Buffer.from("late") });
     expect(put.status).toBe(412);
@@ -466,7 +472,32 @@ describe("upload URLs after a share ends (review M1 residual)", () => {
 
     const retry = await fetch(upload.url, { method: "PUT", headers: upload.headers, body: Buffer.from("abcd") });
     expect(retry.status).toBe(412);
-    expect(await contentGone(objectKeyOf(upload.url))).toBe(true);
+    expect(await drainJanitor(() => contentGone(objectKeyOf(upload.url)))).toBe(true);
+    expect((await fetch(upload.url, { method: "PUT", headers: upload.headers, body: Buffer.from("abcd") })).status).toBe(412);
+  });
+
+  it("a PUT that beats the janitor after a cancel stores bytes nobody can reach, which the janitor then overwrites (D-1)", async () => {
+    // The trade-off of one deletion executor: between a cancel and the janitor's next run a live
+    // upload URL can still store bytes. They are never reachable (the file is rejected), and the
+    // janitor's tombstone then holds the key until the URL expires (phase 3 §18).
+    await setCronJobActive("trigger-storage-janitor", false);
+    try {
+      const a = await Device.create(newNetwork().ip());
+      const { shareId, upload } = await initOne(a);
+      const key = objectKeyOf(upload.url);
+      expect((await a.call("DELETE", `/api/v1/shares/${shareId}`)).status).toBe(204);
+      expect((await fetch(upload.url, { method: "PUT", headers: upload.headers, body: Buffer.from("race") })).status).toBe(200);
+      expect((await a.call("POST", `/api/v1/shares/${shareId}/files/${upload.fileId}/complete`, {})).status).toBe(404);
+      expect((await a.call("POST", `/api/v1/files/${upload.fileId}/download-url`, {})).status).toBe(404);
+      const b = await Device.create(a.ip);
+      expect(await b.feedIds()).not.toContain(shareId);
+
+      expect(await drainJanitor(async () => (await outboxRow(key))?.tombstoned_at != null)).toBe(true);
+      expect(await storedObject(key)).toEqual({ size: 0, tombstone: true });
+      expect((await fetch(upload.url, { method: "PUT", headers: upload.headers, body: Buffer.from("race") })).status).toBe(412);
+    } finally {
+      await setCronJobActive("trigger-storage-janitor", true);
+    }
   });
 
   it("completion is refused after the upload deadline, before the cleanup job has run", async () => {
@@ -536,22 +567,20 @@ describe("upload URLs after a share ends (review M1 residual)", () => {
     expect(replay.body.uploads).toEqual([]);
   });
 
-  it("releases a held key once every upload URL has expired (opportunistic sweep)", async () => {
+  it("the janitor releases a held key once every upload URL has expired", async () => {
     const a = await Device.create(newNetwork().ip());
     const { init, upload } = await a.uploadFile("held.txt", new TextEncoder().encode("held"), "text/plain");
     const key = objectKeyOf(upload.url);
     expect((await a.call("DELETE", `/api/v1/shares/${init.body.share.id}`)).status).toBe(204);
+    expect(await drainJanitor(async () => (await outboxRow(key))?.tombstoned_at != null)).toBe(true);
     expect((await storedObject(key))?.tombstone).toBe(true);
 
     // Time passes: the URL has expired and the hold is due.
     await adminDb().query("update app.files set upload_url_expires_at = now() - interval '10 minutes' where id = $1", [upload.fileId]);
     await adminDb().query("update app.object_deletions set not_before = now() - interval '1 second' where object_key = $1 and completed_at is null", [key]);
 
-    // Any later deletion runs a small sweep of due storage deletions after its response.
-    const other = await a.postText();
-    expect((await a.call("DELETE", `/api/v1/shares/${other.id}`)).status).toBe(204);
-    // The sweep deletes the object, then marks the outbox row complete: wait for the latter.
-    expect(await waitFor(async () => (await outboxRow(key))?.completed_at != null)).toBe(true);
+    // The janitor deletes the object, then marks the outbox row complete: wait for the latter.
+    expect(await drainJanitor(async () => (await outboxRow(key))?.completed_at != null)).toBe(true);
     expect(await storedObject(key)).toBeNull();
   });
 });

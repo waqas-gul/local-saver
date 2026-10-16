@@ -3,10 +3,10 @@
 | Field | Value |
 |---|---|
 | Status | **Living document.** It describes the architecture that is implemented now, not the target design. |
-| Covers | Phase 0 (foundation), Phase 1 (anonymous local sharing) and Phase 2 (remote secure sharing), as built |
-| Checked against | The code on branch `phase-2-remote-sharing` (uncommitted changes on top of `538334d`), 2026-10-16, after the review against the owner's Phase 2 decisions. Phase 1 alone: commit `1cd8ee3` on `phase-1-local-sharing`. |
+| Covers | Phase 0 (foundation), Phase 1 (anonymous local sharing), Phase 2 (remote secure sharing) and Phase 3 (expiry, cleanup and one-time download), as built |
+| Checked against | The code on branch `phase-3-expiry-one-time-download` (uncommitted changes on top of `3e03120`, the Phase 2 commit), 2026-10-16, after the Phase 3 implementation. Phase 1 alone: commit `1cd8ee3` on `phase-1-local-sharing`. |
 | Production state | **Nothing is deployed.** Everything below runs and is tested on the local stack only. What has been verified at which level (local tests, CI, staging, real devices, production) is in [§18](#verification-levels); the gaps are in §17. |
-| Last updated | 2026-10-16 (owner decisions for Phase 2 recorded; verification levels added to §18) |
+| Last updated | 2026-10-16 (Phase 3: the storage janitor, retention jobs, job health, burn after download; security review: legal-hold copies, token and injected-key findings) |
 | Change rule | A phase that changes the architecture updates this file in the same change (§19) |
 
 This is the one document to read to understand how the system works today. It stays high-level and links to the detailed documents instead of repeating them.
@@ -63,7 +63,7 @@ Local Saver lets devices on the same network share text and files without any se
 - **Share their own post by link**, with a QR code and optionally a short code, from any network; see and turn off those links (§9).
 - **Open a link or a code** on any device and network, without the app or a sign-in; **report** a share they can see.
 
-**What does not exist yet:** accounts, Pro and Team plans, payments, password-protected links, rooms and room links, burn-after-download, a web admin console and malware scanning. They are planned for Phases 3–6, and **none of their behaviour exists**. The schema and the plan object only reserve values for some of them (for example the share statuses `claimed` and `consumed`, the `ws` retention class, `link_grants.password_version`, and feature flags that are all off).
+**What does not exist yet:** accounts, Pro and Team plans, payments, password-protected links, rooms and room links, multipart uploads, a web admin console and malware scanning. They are planned for Phases 4–6, and **none of their behaviour exists**. The schema and the plan object only reserve values for some of them (for example the `ws` retention class, `link_grants.password_version`, and feature flags that are all off). Burn after download exists since Phase 3, available to the Free plan only while the beta flag `free_burn_after_download` is on (Q-008; off by default).
 
 ### Main components
 
@@ -76,6 +76,9 @@ Local Saver lets devices on the same network share text and files without any se
 | Realtime | Private Broadcast channels and Presence | Supabase |
 | File storage | Cloudflare R2 through the S3 API (RustFS locally) | Cloudflare (local: Docker) |
 | Edge | Cloudflare proxy, origin lock, Turnstile | Cloudflare (supported in code, not set up yet) |
+| Storage janitor (Phase 3) | The `storage-janitor` Edge Function: the one executor of the deletion outbox and the weekly storage reconciliation, triggered by pg_cron through pg_net (§11) | Supabase Edge Functions (Deno; locally the CLI's edge runtime) |
+| Egress-list refresh (Phase 3) | A daily GitHub Actions workflow running `scripts/load-egress-ranges.cjs` (§6.7) | GitHub Actions (off until an environment exists) |
+| Job health (Phase 3) | `GET /api/v1/health/cron`, polled by an external uptime monitor (none configured yet) | Next.js server |
 
 ### Key terms
 
@@ -147,17 +150,25 @@ flowchart LR
     AU["Auth"]
     RT["Realtime"]
     CR["pg_cron jobs"]
+    EF["Edge Function<br/>storage-janitor (Phase 3)"]
   end
   R2[("R2 bucket<br/>private")]
+  GH["GitHub Actions<br/>egress refresh (Phase 3)"]
+  MON["Uptime monitor<br/>(not configured)"]
 
   B -- "JSON + bearer token (app) or link-session cookie (viewers)" --> CF --> P --> API --> S
   S -- "SQL as app_server" --> DB
-  S -. "presign, HEAD, ranged GET, tombstone, DELETE" .-> R2
+  S -. "presign, HEAD, ranged GET" .-> R2
   B -- "presigned PUT and GET (bytes)" --> R2
   B -- "anonymous sign-in, token refresh" --> AU
   DB -- "triggers: realtime.send (IDs only)" --> RT
   RT -- "signals and presence (WebSocket)" --> B
   CR --> DB
+  CR -- "pg_net POST + Vault secret" --> EF
+  EF -- "SQL as app_janitor (janitor functions only)" --> DB
+  EF -. "tombstone, DELETE, list" .-> R2
+  GH -- "SQL as app_egress_loader" --> DB
+  MON -- "GET /api/v1/health/cron" --> CF
 ```
 
 The main path, step by step:
@@ -165,10 +176,11 @@ The main path, step by step:
 1. **Browser.** Renders the UI, keeps client state in Zustand and server data in the TanStack Query cache. It talks to Supabase only for Auth and Realtime, never to application tables.
 2. **Next.js.** `proxy.ts` runs first on every request (origin lock, request ID, CSP, security headers). Route handlers under `/api/v1` are thin: authenticate, validate, call one service, return a DTO.
 3. **API/server services** (`lib/server`). Derive the caller's network from the trusted IP on every request that touches local content, apply authorization, limits and quotas, run transactions, presign storage URLs and write audit events.
-4. **Supabase Postgres.** The source of truth: shares, files, texts, network spaces, presence, quotas, the deletion outbox. Atomic functions handle races; pg_cron jobs expire shares and clean up.
-5. **R2.** Holds file bytes only. The browser uploads and downloads directly with short-lived presigned URLs. The server reads only the first 4,100 bytes of each upload to check its type.
-6. **Supabase Realtime.** Database triggers send ID-only signals ("share X changed") to private channels.
-7. **Browser again.** A signal makes the client refetch through the API, which re-checks the network before returning anything.
+4. **Supabase Postgres.** The source of truth: shares, files, texts, network spaces, presence, quotas, the deletion outbox. Atomic functions handle races (burn claims included); pg_cron jobs expire shares, finalize burn claims, purge and reconcile, and trigger the storage janitor.
+5. **Storage janitor** (Phase 3). An Edge Function that deletes or tombstones the objects of ended shares, the only code that does (D-1), and reconciles the bucket weekly.
+6. **R2.** Holds file bytes only. The browser uploads and downloads directly with short-lived presigned URLs. The server reads only the first 4,100 bytes of each upload to check its type.
+7. **Supabase Realtime.** Database triggers send ID-only signals ("share X changed") to private channels.
+8. **Browser again.** A signal makes the client refetch through the API, which re-checks the network before returning anything.
 
 A **link viewer** takes a shorter path: its browser loads a share or code page, proves the link's secret (or a code) to the API, and from then on sends only an httpOnly link-session cookie. It never talks to Supabase and polls instead of receiving Realtime signals (§9.3).
 
@@ -179,6 +191,7 @@ A **link viewer** takes a shorter path: its browser loads a share or code page, 
 | Route handlers | Parse and validate input, call one service, map to a DTO and status. A few also apply a rate limit (feed, My uploads, share detail). | Contain business rules or SQL |
 | Services (`lib/server`) | Network derivation, authorization, limits, quotas, state changes, presigning, audit | Return raw rows. Log secrets or IP addresses. |
 | Postgres | Data, constraints, atomic functions, Realtime triggers, scheduled jobs | Store file bytes or plaintext secrets. The app's tables never hold raw IPs; Supabase Auth's own tables do (Q-031). |
+| Storage janitor (Phase 3) | Executing the deletion outbox under SQL guard rails; weekly reconciliation | Decide what to delete (the database does), touch tables directly, read the platform's service secrets |
 | R2 | File bytes, with headers fixed at upload | Be publicly readable. Decide expiry. |
 | Realtime | Deliver ID-only signals and Presence to authorized subscribers | Carry content, file names or URLs. Act as a data source. |
 | Cloudflare | TLS, the only path to the origin, a trustworthy client IP, bot checks | Cache API responses or HTML |
@@ -310,11 +323,13 @@ Defaults (`lib/client/query-client.ts`): `staleTime` 30 s, refetch on window foc
 
 ### 5.2 API surface
 
-24 handlers in 22 route files (14 from Phase 1, 10 from Phase 2). Request and response contracts: [`lib/shared/api/schemas.ts`](../lib/shared/api/schemas.ts). The full catalogue, including later phases, is in [02 §6.2](02-system-architecture.md#62-endpoint-catalogue-by-phase).
+30 handlers in 28 route files (14 from Phase 1, 10 from Phase 2, 6 from Phase 3). Request and response contracts: [`lib/shared/api/schemas.ts`](../lib/shared/api/schemas.ts). The full catalogue, including later phases, is in [02 §6.2](02-system-architecture.md#62-endpoint-catalogue-by-phase).
 
 | Area | Endpoints | Caller |
 |---|---|---|
-| Health | `GET /api/v1/health` (liveness), `?ready=1` (also checks the database) | Anyone |
+| Health | `GET /api/v1/health` (liveness), `?ready=1` (also checks the database); `GET /api/v1/health/cron` (job health, 503 when degraded; Phase 3) | Anyone |
+| Entitlements (Phase 3) | `GET /me/entitlements` (`burnAfterDownload` allowed now?) | Device |
+| Burn after download (Phase 3) | `POST /shares/{id}/reveal`, `POST /shares/{id}/confirm-received`; `POST /links/{linkId}/reveal`, `POST /links/{linkId}/confirm-received`; download-url bodies take `{ confirm: true }` | Device that can see the share · the claimant · grant holders · the viewer claimant |
 | Devices | `POST /devices` (register or refresh), `PATCH /devices/{deviceId}` (rename) | Any session · device owner |
 | Network | `POST /network/observe` | Device |
 | Feeds | `GET /local/shares` (this network), `GET /me/shares` (My uploads); cursor pagination, `limit` 1–100, default 50 | Device on an `ok` network · creator |
@@ -522,12 +537,12 @@ One public IP can cover a campus, an office building or carrier-grade NAT, so a 
 
 ### 6.7 Private Relay and Tor
 
-- **Lists.** Apple iCloud Private Relay egress ranges and the Tor exit list live in `app.network_egress_ranges`. They are loaded **manually** with `pnpm egress:load`, at least weekly ([runbook](runbooks/egress-lists.md)). Adjacent ranges are merged: on 2026-10-15, 285,091 Private Relay ranges became 14,068 rows and 1,210 Tor exits became 642. The schema also allows `vpn` and `hosting` sources, but no such list is loaded, and there is no ASN classification (SP-04).
+- **Lists.** Apple iCloud Private Relay egress ranges and the Tor exit list live in `app.network_egress_ranges`. Since Phase 3 a daily GitHub Actions workflow loads them, running `scripts/load-egress-ranges.cjs` as the least-privilege `app_egress_loader` through `app.replace_egress_ranges` (D-4). It is off until environments exist; until then they are loaded by hand with `pnpm egress:load` ([runbook](runbooks/egress-lists.md)). Adjacent ranges are merged: on 2026-10-15, 285,091 Private Relay ranges became 14,068 rows and 1,210 Tor exits became 642. The schema also allows `vpn` and `hosting` sources, but no such list is loaded, and there is no ASN classification (SP-04).
 - **Lookup without the address** (DV1-23):
   - The app sends only the IPv4 /24 or IPv6 /48 around the address to `app.egress_ranges_overlapping`, which refuses longer prefixes.
   - The app checks exact containment itself.
   - Postgres never receives the client address; a test with full statement logging confirms it.
-- **Fail closed.** If the lists were never loaded or are older than 14 days, staging and production report `unavailable` (`classification_unavailable`) for every network and log `network.egress_list_stale`. Locally the lists are optional.
+- **Fail closed.** If the lists were never loaded or are older than 14 days, staging and production report `unavailable` (`classification_unavailable`) for every network and log `network.egress_list_stale`. `/health/cron` reports `egressLists: stale` after 3 days, well before that. Locally the lists are optional.
 
 ### 6.8 When local sharing is unavailable
 
@@ -649,13 +664,21 @@ There is no reconciliation job yet (Phase 3).
 
   It is idempotent.
 - **Access ends immediately,** because every request checks status and expiry. Storage cleanup is not the security boundary.
-- **The storage executor** (`lib/server/shares/end.ts`) runs the share's deletions right after a creator delete or an upload rejection. It then sweeps up to 10 more due deletions after the response (Next.js `after()`). For each claimed row (`app.claim_object_deletions`):
-  - **If an upload URL for the object may still be live** (its recorded expiry plus 5 minutes), the object is overwritten with an **empty tombstone** and the row is retried after that time. The key stays taken, so the write-once URL gets `412` and can't put bytes back (F1-12).
-  - **Otherwise** the object is deleted.
-  - **Failures** stay queued.
-- **Leftovers.** There is no dedicated storage janitor yet (Phase 3). Objects of shares ended by the expiry or stale-upload jobs are deleted by later sweeps, and sweeps run only when someone deletes a share or an upload is rejected. The R2 lifecycle rule is meant to be the backstop once a bucket exists (§11); today only RustFS exists, without lifecycle rules.
+- **One deletion executor: the storage janitor** (Phase 3, owner decision D-1; §11). The web tier no longer deletes or tombstones anything: `lib/server/shares/end.ts` only calls `end_share`. Every minute pg_cron's `trigger-storage-janitor` posts to the `storage-janitor` Edge Function when outbox rows are due. The function claims them through `app.janitor_claim_deletions`, under SQL guard rails:
+  - the key has the generated format;
+  - no file of an open share uses it;
+  - it isn't on legal hold.
 
-Detail: [03 §7.7](03-security-and-network-design.md#77-deleting-objects-while-upload-urls-are-live-phase-1-as-built), [04 §9.2](04-database-and-storage-design.md#92-job-catalogue).
+  Then, for each row:
+  - **If an upload URL for the object may still be live** (its recorded expiry plus 5 minutes), the object is overwritten with an **empty tombstone** and the row comes back after that time. The key stays taken, so the write-once URL gets `412` and can't put bytes back (F1-12).
+  - **Otherwise** the object is deleted.
+  - **Failures** back off: 1 min, 5 min, 30 min, 2 h, then every 12 h. From the fifth failure they are reported.
+- **The cost of one executor (RISK-034, accepted).** Bytes stay in storage until the janitor's next run, about a minute, while access has already ended. In that window a cancelled upload's still-valid URL can store bytes: they are never reachable, and the janitor then tombstones the key.
+- **Consumed burn shares** wait 5 minutes before deletion, so a download from a URL issued just before the end can finish.
+- **Takedowns** put the objects on legal hold instead (D-2, §9.7). Each run first copies held objects to `hold/<key>`, a prefix no lifecycle rule covers. After an operator's release, the janitor deletes the original and the copy together.
+- **Backstop.** The R2 lifecycle rule is the backstop once a bucket exists (§11); today only RustFS exists, without lifecycle rules. It never reaches `hold/`.
+
+Detail: [03 §7.7](03-security-and-network-design.md#77-deleting-objects-while-upload-urls-are-live-phase-1-as-built), [04 §9.2](04-database-and-storage-design.md#92-job-catalogue), [janitor runbook](runbooks/janitor.md).
 
 ### 7.7 Download and preview URLs
 
@@ -667,6 +690,27 @@ Detail: [03 §7.7](03-security-and-network-design.md#77-deleting-objects-while-u
   5. Records the issuance in `app.downloads`, with the browser family and no IP.
 - **Preview URLs** pass the same checks, but only for verified raster images up to 20 MB, and last 300 seconds. They render in a plain `<img referrerpolicy="no-referrer">`, never through `next/image`, and are refetched after 4 minutes.
 - **No storage of URLs.** They are never stored, cached on the server or sent over Realtime. Completed downloads are not observable, because the bytes come straight from R2.
+
+### 7.8 Burn after download (Phase 3)
+
+A share posted with `burnAfterDownload` (files or text, to a network or Link only) goes to the first person who opens it (DEC-015, [phase 3 §18](phases/phase-3-expiry-one-time-download.md#18-implementation-2026-10-16)).
+
+- **Who may post one (Q-008).** `features.burnAfterDownload`, or the Free plan while the runtime flag `free_burn_after_download` is on (default off). This is checked at creation only, and the share's entitlement snapshot records the grant. The kill switch `burn_after_download_enabled` stops new burn shares. The UI asks `GET /me/entitlements` before offering the toggle.
+- **The claim.** The first download URL (or the first **Reveal** of a text) by anyone but the creator calls `app.claim_burn_share` in the request's transaction:
+  - It is one conditional UPDATE (`status = 'active'`) under the share's row lock.
+  - The losers wait for the lock, then update nothing.
+  - It runs at READ COMMITTED; stricter levels are refused.
+  - The URL is presigned before commit.
+
+  The claimant is the verified user and device, or the link session's hash. 50 simultaneous claims give exactly one winner (T-037).
+- **Grace.** `least(15 min + 1 s per MiB, 6 h)`, never past the share's expiry (D-6). The claimant gets at most 3 download URLs per file, or 3 reveals, and can end it early with **confirm-received** ("I've got it"). The `finalize-burn-claims` job consumes shares whose grace is over; request-time checks stop access at the grace end first.
+- **What others see.** Anyone else who could have seen the share gets `410 ALREADY_DOWNLOADED` (`byYou` tells the claimant it was them). Everyone else still gets `404`. The claimant keeps the card in their feed; the creator sees it in My uploads, and may download until it is consumed (D-7). A creator who opens their own link in a browser is a link viewer and claims it.
+- **Restrictions.**
+  - No previews.
+  - The text is never in a DTO for anyone but the creator: only Reveal returns it, and the client keeps it in component state, never in the query cache.
+  - Every claim is a POST with `confirm: true`; without it the server answers `409 CONFIRMATION_REQUIRED`.
+  - GETs (feeds, detail, viewer content, share pages, unfurlers) never claim.
+- **The end.** A consumed share ends through `end_share('consumed')`: text erased, links revoked, quota released, objects deleted 5 minutes later.
 
 ---
 
@@ -757,7 +801,10 @@ Generated in the browser (`components/qr/share-qr.tsx`, library `qr`) from the f
 - `POST /reports`: a link viewer reports the link's share (needs its grant); a device reports a share it can see. Category from a fixed list, optional details (≤ 2,000 characters, required for "other") and email; Turnstile wherever it is configured; 10 an hour per network key and per reporter.
 - Stored in `abuse_reports`, audited (`report.created`) and logged as the structured event **`abuse.report_received`** (IDs and category only; `urgent: true` for child safety).
 - **Nobody is notified.** There is no email, chat, SMS or pager alert (owner decision 2026-10-16). Operators find reports with the runbook's triage query. The alert on that log event, its channel and the named operator are future operational requirements (Q-022).
-- **Takedown** runs in SQL from the MFA-protected Supabase dashboard, never through the app: `app.admin_block_share` (ends the share as `blocked`, revokes its links, queues its files) and `app.admin_block_link`. Both are audited (`admin.block`) and resolve the related reports ([runbook](runbooks/takedown.md)). Bytes are deleted by the next storage sweep or by hand; there is no janitor before Phase 3 and no evidence preservation (RISK-031).
+- **Takedown** runs in SQL from the MFA-protected Supabase dashboard, never through the app: `app.admin_block_share` (ends the share as `blocked`, revokes its links, **holds** its files) and `app.admin_block_link`. Both are audited (`admin.block`) and resolve the related reports ([runbook](runbooks/takedown.md)).
+- **Evidence (Phase 3, D-2 and D-3).**
+  - A blocked share's objects are on legal hold. The janitor and the purge skip them, and an operator releases them with `app.admin_release_hold` (audited). Shares with reports are never purged automatically.
+  - **R2's lifecycle rules ignore holds.** They delete `d7/`, `d30/` and `d90/` objects at their class period + 1 day after upload. So the janitor copies each held object to `hold/<key>`, which no rule covers, and the copy stays until the release ([security review](phases/phase-3-expiry-one-time-download.md#1813-security-review-2026-10-16)). On real R2 this is still pending (RISK-031). How long to keep evidence is a legal decision (Q-022).
 
 ### 9.8 Kill switches
 
@@ -765,8 +812,10 @@ Generated in the browser (`components/qr/share-qr.tsx`, library `qr`) from the f
 |---|---|
 | `remote_links_enabled` | No link creation or link-only posting; unlock, viewer content and file URLs, and code resolution answer `503 REMOTE_LINKS_DISABLED`. Creators can still list and revoke links. |
 | `short_codes_enabled` | No new codes; resolution answers `503 SHORT_CODES_DISABLED`. Links still work. |
+| `burn_after_download_enabled` (Phase 3) | No new burn shares (`503 BURN_AFTER_DOWNLOAD_DISABLED`); existing ones keep working |
+| `storage_janitor_enabled` (Phase 3) | The janitor claims nothing and pg_cron posts nothing; access is unaffected |
 
-[Runbook](runbooks/kill-switches.md).
+`free_burn_after_download` (Q-008) is the other way round: Free may create burn shares only while it is on (default off). [Runbook](runbooks/kill-switches.md).
 
 ---
 
@@ -777,6 +826,10 @@ Generated in the browser (`components/qr/share-qr.tsx`, library `qr`) from the f
 - **`app`**: all application tables and functions, owned by **`app_owner`** (no login). It is not exposed through the Supabase Data API, which exposes only `public` and `graphql_public` (`supabase/config.toml`), and client roles have no grants on it.
 - **`app_realtime`**: one `SECURITY DEFINER` helper used by the Realtime policies. `authenticated` may use the schema and execute that helper, nothing else.
 - **`app_server`**: the role the Next.js server logs in as, through a `pg` pool of 5 connections. Locally it connects directly (port 54322); hosted environments are meant to use the Supavisor pooler. Its password is set per environment and never appears in migrations; `supabase/seed.sql` sets a local-only one.
+- **`app_janitor`** (Phase 3): the storage janitor's role. It has no table privileges, only EXECUTE on the eight `janitor_*` SECURITY DEFINER functions (owned by `app_owner`).
+- **`app_egress_loader`** (Phase 3): the egress-list loader's role. It has no table privileges, only EXECUTE on `replace_egress_ranges`.
+
+Both are NOLOGIN in migrations; logins are set per environment, locally by `seed.sql`.
 
 ### 10.2 Major tables
 
@@ -787,7 +840,7 @@ Generated in the browser (`components/qr/share-qr.tsx`, library `qr`) from the f
 | Network | `network_spaces` | Network key, key version, family, status, reason, sticky-until, devices in 24 h |
 | | `network_presence` | Device present on a space until `present_until` (10 minutes after the last observe) |
 | | `network_egress_ranges` | Private Relay and Tor ranges (`cidr`, `source`) |
-| Content | `shares` | One post: scope (`network`), space, kind (`files`/`text`), creator, status, expiry, retention class, entitlement snapshot, end reason |
+| Content | `shares` | One post: scope, space, kind (`files`/`text`), creator, status, expiry, retention class, entitlement snapshot, end reason; Phase 3: burn flag and the claim (claimant user and device, or link-session hash, link, grace end) |
 | | `files` | One stored object: object key, original name, declared and detected type, sizes, upload status, deadline, URL expiry, risk flags, preview kind |
 | | `text_items` | Text content (erased when the share ends) and its version |
 | | `downloads` | Download and preview URL issuances (by devices or, with the link ID, link viewers), with a retention date |
@@ -796,7 +849,9 @@ Generated in the browser (`components/qr/share-qr.tsx`, library `qr`) from the f
 | | `link_grants` | (session, link): which links a session may open, until when (≤ 12 hours) |
 | | `abuse_reports` | Reports: target share and link, the share's network, category, details, optional email, reporter kind, review status |
 | Storage | `storage_usage`, `storage_reservations` | Quota ledger: committed and reserved bytes per user |
-| | `object_deletions` | Deletion outbox: due time, attempts, lock, tombstone time, completion |
+| | `object_deletions` | Deletion outbox: reason (including `orphan`), due time, attempts, last error and attempt, lock, tombstone time, completion, legal hold and its reason |
+| Jobs (Phase 3) | `job_heartbeats` | Last start, success, failure, error and result (counts only) per job; `app_server` may only read it |
+| | `storage_reconcile_runs` | Weekly reconciliation runs: cursor (last key), lock, counts, status; no app access |
 | Operations | `runtime_flags` | Kill switches, the large-network cap, the egress-list load time |
 | | `rate_counters` | Fixed-window counters for rate limits, daily volume and code failures; 24-hour code blocks |
 | | `idempotency_keys` | Share-creation replay records (24 hours) |
@@ -850,7 +905,14 @@ Notes:
 | `end_share` | The single path that ends a share (§7.6); since Phase 2 it also revokes the share's links and clears their codes |
 | `admin_block_share`, `admin_block_link` | Takedown (§9.7): block a share (through `end_share`) or one link, resolve the related reports, write `admin.block` |
 | `check_link_expiry` | Trigger: a link can't outlive its share |
-| `claim_object_deletions` | Claim due deletions for 2 minutes with `SKIP LOCKED`, and say whether to tombstone |
+| `claim_object_deletions` | Phase 1's claim of due deletions. Since Phase 3 it is granted to nobody (D-1), and the janitor uses `janitor_claim_deletions`. |
+| `claim_burn_share`, `confirm_burn_received`, `burn_grace` | Burn after download (§7.8) |
+| `janitor_*` | The janitor's only access: claim with guard rails, finish (deleted, tombstoned, failed with backoff, dry run), heartbeats, reconcile pages and cursor |
+| `admin_release_hold` | Release a takedown's legal hold (operators only) |
+| `purge_tombstones`, `cleanup_anonymous_users`, `reconcile_storage_usage`, `finalize_claims` | Phase 3 jobs (§10.6) |
+| `run_job`, `record_job_run`, `cron_health` | Job runner with heartbeats; job health for `/health/cron` (`cron_health` is the only one `app_server` may call) |
+| `trigger_storage_janitor`, `start_storage_reconcile` | Post to the janitor through pg_net with the Vault secret (owned by the migration role) |
+| `replace_egress_ranges` | Replace one egress source and record the load (for `app_egress_loader`) |
 | `rate_limit_hit` | One atomic fixed-window counter upsert |
 | `app_realtime.can_access_topic` | Realtime topic authorization (§12.4) |
 | `emit_share_changed`, `emit_text_changed`, `emit_network_changed` | Triggers that send Realtime signals |
@@ -866,14 +928,26 @@ Notes:
 | `release-stale-reservations` | Every 10 minutes | Releases reservations past their expiry |
 | `purge-idle-spaces` | Daily, 03:17 | Deletes spaces not seen for 30 days that have no share rows (in any state) and no presence rows; never `blocked` ones. Ended shares aren't purged yet, so a space that ever had a share is kept. |
 
-Not scheduled yet (Phase 3): purging ended shares (and with them their links), download records and audit events past their retention dates; deleting inactive anonymous users; reconciling storage usage; the storage janitor; refreshing the egress lists. Abuse reports have no retention job (legal advice, Q-022).
+Phase 3 jobs run through `app.run_job`, which records a heartbeat on success and on failure ([cron runbook](runbooks/cron.md)):
+
+| Job | Schedule | Does |
+|---|---|---|
+| `trigger-storage-janitor` | Every minute | Posts `delete` (rows due) or `reconcile` (a run open) to the janitor through pg_net, with the URL and secret from Vault |
+| `finalize-burn-claims` | Every minute | Consumes claimed shares past grace |
+| `cron-heartbeat` | Every 5 minutes (`2-59/5`) | Proves pg_cron runs |
+| `purge-tombstones` | Daily, 03:03 | Deletes ended shares 30 days after they end (with files, text, downloads, links and grants), downloads and audit events past their dates, and completed outbox rows after 30 days. Never: open, held or reported shares, their downloads, audit events about them, or `admin.*` and `report.*` events (D-3). |
+| `cleanup-anonymous-users` | Daily, 03:33 | Deletes anonymous users 30 days inactive with nothing open; never suspended ones (D-9) |
+| `reconcile-storage-usage` | Daily, 04:04 | Recounts the quota ledger and audits drift |
+| `reconcile-r2-orphans` | Sundays, 05:06 | Opens the weekly bucket reconciliation |
+
+The egress lists are refreshed by a GitHub Actions schedule, not pg_cron (D-4). Abuse reports have no retention job (legal advice, Q-022).
 
 ### 10.7 Migrations and types
 
-- Schema changes are SQL-first in `supabase/migrations/`: the Phase 0 baseline, the Phase 1 migration and the Phase 2 migration (`20261015180000_phase2_remote_sharing.sql`).
+- Schema changes are SQL-first in `supabase/migrations/`: the Phase 0 baseline, the Phase 1 migration, the Phase 2 migration (`20261015180000_phase2_remote_sharing.sql`) and three Phase 3 migrations (`20261016120000_phase3_janitor.sql`, `…120100_phase3_burn.sql`, `…120200_phase3_retention.sql`).
 - pgTAP tests are in `supabase/tests/`.
 - `pnpm db:types` regenerates `lib/server/db/types.gen.ts` with `kysely-codegen`. CI fails if the committed types differ.
-- `pnpm stack:start` applies migrations and the seed to the local stack.
+- `pnpm stack:start` applies migrations and the seed to the local stack, and since Phase 3 also serves the Edge Functions.
 
 ---
 
@@ -886,10 +960,10 @@ Not scheduled yet (Phase 3): purging ended shares (and with them their links), d
 | Object keys | `{retentionClass}/{yyyy}/{mm}/{dd}/{fileId}`. Local shares use `d7` (expiry up to 7 days); `d30` and `d90` exist for later phases, and `ws` is reserved for Team. No file names, users or networks appear in keys. Every key is checked against this pattern before any storage call. |
 | Object headers | Fixed and signed at upload: `Content-Type` (a raster image type or `application/octet-stream`), `Content-Disposition: attachment; filename…`, `Cache-Control: private, no-cache` |
 | Signed URLs | Upload PUT: at most 15 minutes, capped at the upload deadline and the share's expiry. Download GET: 60 seconds. Preview GET: 300 seconds. SigV4 is computed on the server; storage credentials never leave it. |
-| Server-side storage calls | HEAD, a ranged GET of the first 4,100 bytes, a tombstone PUT, DELETE |
+| Server-side storage calls | Web tier: HEAD and a ranged GET of the first 4,100 bytes. Storage janitor (Phase 3): tombstone PUT, DELETE (single objects; no DeleteObjects, RISK-011), ListObjectsV2, multipart listing and abort, with its own R2 token. |
 | CORS | `infra/r2/cors.staging.json` and `cors.production.json`: the app origin only (placeholder `example.invalid` origins until the domain is chosen, Q-020); `PUT`, `GET`, `HEAD`; exactly the signed upload headers; `ETag` exposed; 1-hour max age |
 | Lifecycle backstop | Written, not applied yet. `infra/r2/lifecycle.json`: `d7/` objects expire after 8 days, `d30/` after 31, `d90/` after 91; incomplete multipart uploads are aborted after 1 day; no rule for `ws/` |
-| Cleanup | The deletion outbox, executed best effort from the API, with tombstones while an upload URL may be live (§7.6). There is no janitor yet. |
+| Cleanup | The deletion outbox, executed only by the storage janitor (Phase 3, §7.6), with tombstones while an upload URL may be live and legal holds for takedowns. Weekly reconciliation queues orphans older than 48 hours, marks verified files whose object is missing, counts unknown keys, and aborts stale multipart uploads. |
 
 **Security boundaries:**
 
@@ -905,7 +979,8 @@ Not scheduled yet (Phase 3): purging ended shares (and with them their links), d
 | Storage | **RustFS 1.0.1** in Docker on port 9000, bucket `local-saver-dev`, created by `pnpm stack:start` with the same CORS rules for local origins | **Cloudflare R2**, one bucket per environment (`{product}-files-staging`, `{product}-files-prod`) |
 | Exists today | Yes; the integration tests and the Phase 1 E2E tests use it (the Phase 0 smoke tests need no storage) | **No.** No bucket exists, and the CORS and lifecycle files are not applied. That needs the owner's Cloudflare account and the domain (Q-020). |
 | Credentials | Fixed local-only keys in `scripts/local-stack.cjs` | A scoped R2 API token in the host's secret store |
-| Behaviour verified | Signed `Content-Length` (±1 byte → `403`), write-once (`412`), how unsigned headers are stored | Must be confirmed on R2 in SP-02 (RISK-011) |
+| Behaviour verified | Signed `Content-Length` (±1 byte → `403`), write-once (`412`), how unsigned headers are stored; Phase 3: ListObjectsV2, DeleteObject of a missing key (`204`), multipart listing and abort, and a 64 MB download completing after its object is deleted mid-stream | Must be confirmed on R2 in SP-02 (RISK-011) |
+| Janitor access | The edge runtime reaches RustFS on the Supabase Docker network as `local-saver-s3`; local-only secrets in `supabase/functions/.env` | The R2 S3 endpoint with a separate janitor token (function secrets) |
 
 Supabase Storage is not used and is disabled in the local configuration.
 
@@ -992,7 +1067,10 @@ Every channel is private. Policies on `realtime.messages` call `app_realtime.can
 | **Request IDs and logging** | One UUID per request in the `X-Request-Id` header, in error bodies and in logs. JSON logs redact keys that look like secrets, tokens, cookies or signatures, plus `X-Amz-Signature` values and URL fragments. The app never logs IP addresses. | Unit tests, and a database-log test for IP leaks |
 | **Secret handling** | All secrets come from environment variables validated at boot (minimum lengths, placeholder detection when deployed). They never use `NEXT_PUBLIC_`. The browser gets only the Supabase publishable key and the Turnstile site key. The database password is never in migrations. Link and code peppers are versioned for rotation. | Unit tests |
 | **Browser cache rules** | Every API response is `Cache-Control: no-store`, and the API client fetches with `no-store`. Pages render per request, and no network-dependent data is rendered or cached on the server. Stored objects are `private, no-cache`. The planned Cloudflare cache rules bypass the API and HTML. | T-047. Cloudflare rules not applied. |
-| **Privacy** | No raw IPs in the app's tables, database query parameters or logs; network keys are keyed hashes. Link viewers get no account; viewer DTOs carry no uploader or network data. **Supabase Auth stores each session's IP** (`auth.sessions.ip` and its audit log): Q-031, not solved. | Database-log tests (F1-13, phase 2 secrets) |
+| **Privacy** | No raw IPs in the app's tables, database query parameters or logs; network keys are keyed hashes. Link viewers get no account; viewer DTOs carry no uploader or network data. **Supabase Auth stores each session's IP** (`auth.sessions.ip` and its audit log): Q-031, not solved; since Phase 3, deleting inactive anonymous users removes their sessions. | Database-log tests (F1-13, phase 2 secrets) |
+| **Storage janitor** (Phase 3) | Its own trust boundary. pg_cron → pg_net → the function with a Vault-held bearer secret, compared in constant time; `verify_jwt` off for this function only; an exact body. It connects as `app_janitor` (ten definer functions, no tables) and never reads the injected `SUPABASE_*` secrets. SQL guard rails, a kill switch, dry run, backoff, health checks. **Residual (security review):**<br>• Supabase injects `SUPABASE_DB_URL` (user `postgres`) and the service-role and secret keys into the function. The runtime can't remove them (`Deno.env.delete` does nothing), so a compromised function could bypass the role (RISK-036).<br>• Its R2 token can read, overwrite and delete everything in the bucket, the narrowest R2 offers (RISK-037). | pgTAP (grants, guard rails, backoff), unit (auth, body, config, a static scan for injected-variable use), integration through the real function (including a blocked `app_janitor`), a fault proxy, mutation checks |
+| **Burn claims** (Phase 3) | One conditional UPDATE under the row lock, READ COMMITTED enforced; POST with `confirm: true`; claimant identity from the verified token and device or the server-issued session hash; the grace capped at expiry; text only through Reveal | T-037 (50 claims at SQL and API level, mutation check), integration and E2E |
+| **Evidence** (Phase 3) | Takedown objects are on legal hold and copied to `hold/`, which no lifecycle rule covers. Reported shares and their records are never purged automatically (D-2, D-3). Not yet proven on real R2 (RISK-031). | pgTAP, unit (the lifecycle config) and integration (the original deleted as R2 would; the copy survives until release) |
 
 Two strict-CSP workarounds must be kept when changing the frontend: zod runs `jitless` in the browser (`lib/shared/api/schemas.ts`), and the layout passes the nonce to `get-nonce` so Radix's scroll lock can add its `<style>` tag (`lib/client/providers.tsx`; F1-5).
 
@@ -1108,23 +1186,27 @@ components/local/             the app's feature UI; its copy (notice, audience, 
 components/share/, qr/, report/, legal/   remote sharing: link dialog, share page, code entry, QR code, reports, legal frame
 lib/client/                   browser runtime: Supabase, app and viewer API clients, queries, Zustand stores, Realtime, uploader
 lib/shared/                   isomorphic: zod API contracts, Free plan numbers, short-code normalization
-lib/server/                   server-only services (import "server-only"), see §5.7
+lib/server/                   server-only services (import "server-only"), see §5.7; Phase 3 adds shares/burn.ts and jobs/health.ts
+components/burn/              Phase 3: the burn confirmation dialog and all burn copy (defined vs owner-review strings)
 supabase/
-  migrations/                 SQL-first schema: baseline (Phase 0), Phase 1 and Phase 2; the source of truth
+  migrations/                 SQL-first schema: baseline (Phase 0), Phases 1, 2 and 3; the source of truth
   tests/                      pgTAP tests
-  config.toml, seed.sql       local Supabase stack; local-only app_server password
+  functions/storage-janitor/  Phase 3: the janitor Edge Function (Deno; deno.json pins aws4fetch and postgres)
+  functions/_shared/          runtime-agnostic janitor core and S3 adapter, shared with the Node tests
+  config.toml, seed.sql       local Supabase stack (edge runtime on; verify_jwt off for the janitor); local-only role passwords and Vault secrets
 infra/
   cloudflare/README.md        Cloudflare zone, origin lock, Turnstile and R2 bucket setup (not applied yet)
   r2/*.json                   bucket CORS (staging, production) and lifecycle backstop
 scripts/
-  local-stack.cjs             RustFS (the local R2 stand-in) and the .env.local generator
-  load-egress-ranges.cjs      loads the Private Relay and Tor lists (runbook)
+  local-stack.cjs             RustFS (the local R2 stand-in), the functions env file, the .env.local generator
+  load-egress-ranges.cjs      loads the Private Relay and Tor lists (runbook; scheduled from Phase 3)
 tests/
   unit/, component/           Vitest (Node / jsdom)
   integration/                Vitest against `next start` and the local stack
   e2e/                        Playwright
   stubs/                      `server-only` stub for tests
 .github/workflows/ci.yml      CI: a checks job and a local-stack job
+.github/workflows/refresh-egress-ranges.yml   Phase 3: the daily egress refresh (off until environments exist)
 project-docs-workthrough/     this documentation
 ```
 
@@ -1134,12 +1216,12 @@ project-docs-workthrough/     this documentation
 
 | Layer | Tool | Location | Size (2026-10-16) | Verifies |
 |---|---|---|---|---|
-| Unit | Vitest (Node) | `tests/unit/` | 35 files | Environment rules (peppers, Turnstile), IP normalization and trusted-IP rules, network keys, egress matching and the list loader, headers and CSP, `proxy.ts`, the API wrapper, crypto, filenames, sniffing, object keys, visibility rule (link-only), entitlements, device labels, client API and upload errors, network-change cache removal, R2 CORS and lifecycle files; Phase 2: link secrets and timing-safe checks, short codes, cookies, the remote file policy, Turnstile verification, the viewer client |
-| Component | Vitest + jsdom + Testing Library | `tests/component/` | 5 files | Providers, UI primitives, status and audience copy, composer; Phase 2: composer destinations, card actions, report dialog and report page (no promise of a review), code entry, the share page (unlock, fragment removal, ended links), the QR code (decoded) |
-| Unit + component total | | | **307 tests** | |
-| Database | pgTAP (`supabase test db`) | `supabase/tests/` | **189 assertions** | Grants and RLS, no client access to `app` functions, presence and classification, quota functions, `end_share`, the deletion claim rule, egress prefix limits, Realtime topic authorization and triggers; Phase 2: link tables and constraints, link-only shares and their signals, link revocation by `end_share`, purge clauses, takedown functions and their grants |
-| API integration | Vitest against a real `next start` (port 3200) with local Supabase and RustFS | `tests/integration/` | **140 tests** in 11 files | Local isolation (T-001 … T-010), the IDOR matrix (with link viewers), uploads and lying clients, tombstones, quota and rate limits, kill switches, Realtime delivery and topic access, API hygiene, no client IP in database logs; Phase 2: links, unlock, grants, codes, reports, takedown, file policy, share-page headers and unfurlers, no secrets in logs or database statements |
-| End-to-end | Playwright on the production build | `tests/e2e/` | **39 runs** | Phase 0 smoke and the origin lock (13); two simulated devices (5); phone-width layout (8); emulated iPhone and Pixel (2 + 2); Phase 2 remote sharing (9) |
+| Unit | Vitest (Node) | `tests/unit/` | 39 files | Environment rules (peppers, Turnstile), IP normalization and trusted-IP rules, network keys, egress matching and the list loader, headers and CSP, `proxy.ts`, the API wrapper, crypto, filenames, sniffing, object keys, visibility rule (link-only), entitlements, device labels, client API and upload errors, network-change cache removal, R2 CORS and lifecycle files; Phase 2: link secrets and timing-safe checks, short codes, cookies, the remote file policy, Turnstile verification, the viewer client |
+| Component | Vitest + jsdom + Testing Library | `tests/component/` | 6 files | Providers, UI primitives, status and audience copy, composer; Phase 2: composer destinations, card actions, report dialog and report page (no promise of a review), code entry, the share page (unlock, fragment removal, ended links), the QR code (decoded) |
+| Unit + component total | | | **376 tests** | Phase 3 adds the janitor core (legal-hold copies included), the S3 fetch adapter, the burn visibility rule, the burn UI, a scan for injected-secret use in the functions, and the `hold/` lifecycle check |
+| Database | pgTAP (`supabase test db`) | `supabase/tests/` | **421 assertions** (Phase 3: 232) | Grants and RLS, no client access to `app` functions, presence and classification, quota functions, `end_share`, the deletion claim rule, egress prefix limits, Realtime topic authorization and triggers; Phase 2: link tables and constraints, link-only shares and their signals, link revocation by `end_share`, purge clauses, takedown functions and their grants |
+| API integration | Vitest against a real `next start` (port 3200) with local Supabase, RustFS and (Phase 3) the real `storage-janitor` Edge Function | `tests/integration/` | **195 tests** in 16 files (Phase 3: burn, the 50-claim race at SQL and API level, janitor with a fault proxy, legal-hold copies and the blocked-role check, retention, cron health) | Local isolation (T-001 … T-010), the IDOR matrix (with link viewers), uploads and lying clients, tombstones, quota and rate limits, kill switches, Realtime delivery and topic access, API hygiene, no client IP in database logs; Phase 2: links, unlock, grants, codes, reports, takedown, file policy, share-page headers and unfurlers, no secrets in logs or database statements |
+| End-to-end | Playwright on the production build | `tests/e2e/` | **45 runs** (shared runtime flags such as Free burn are set once in Playwright's global setup, `tests/e2e/support/global-setup.ts`, so parallel files can't race over them: phase 3 §18.11) | Phase 0 smoke and the origin lock (13); two simulated devices (5); phone-width layout (8); emulated iPhone and Pixel (3 + 3, including the burn confirmation); Phase 2 remote sharing (9); Phase 3 burn flows (4) |
 
 **How networks are simulated.**
 
@@ -1161,7 +1243,7 @@ Commands:
 - `pnpm stack:start`, then `pnpm build`.
 - `pnpm test:integration`, `pnpm test:e2e`, `pnpm db:test`.
 
-Test maps: [09 §4.11](09-testing-strategy.md#411-phase-1-test-map-as-built-2026-10-15) (Phase 1) and [09 §4.12](09-testing-strategy.md#412-phase-2-test-map-as-built-2026-10-15) (Phase 2).
+Test maps: [09 §4.11](09-testing-strategy.md#411-phase-1-test-map-as-built-2026-10-15) (Phase 1), [09 §4.12](09-testing-strategy.md#412-phase-2-test-map-as-built-2026-10-15) (Phase 2) and [phase 3 §18](phases/phase-3-expiry-one-time-download.md#18-implementation-2026-10-16) (Phase 3).
 
 ---
 
@@ -1177,13 +1259,13 @@ Test maps: [09 §4.11](09-testing-strategy.md#411-phase-1-test-map-as-built-2026
 - **Turnstile.** The server's own Turnstile checks are tested only against a local siteverify stand-in.
 - **IPv4/IPv6 and real networks.** Same-network grouping, different-network isolation, network switching, Private Relay and carrier NAT have never been tested on real networks (AC-1.11). Dual-stack linking (T-009) waits for SP-04. Steps: [manual and staging procedure](phases/phase-1-manual-verification.md).
 - **Jobs and backstop.** The jobs have been seen running locally only. The R2 lifecycle backstop is unconfirmed (AC-1.8), and the quota, rate-limit and kill-switch checks haven't run on staging (AC-1.9).
+- **Storage janitor and Edge Functions (Phase 3).** Measured and tested on the local edge runtime only (P3-00). Hosted limits, the 24-hour dry run, deletion latency (AC-3.2) and the 7-day soak (AC-3.5) need staging. **No uptime monitor is configured and no alert recipient is named, so nothing alerts anyone yet** (D-5).
 - **CI** ran once: a push to `main` with the Phase 0 commit on 2026-09-29, which **failed** at typecheck. The current workflow has never run: the Phase 1 branch is pushed but has no pull request, the Phase 2 work isn't committed, and CI runs only on pull requests and pushes to `main`.
 - **Takedown** has not been rehearsed on staging (AC-2.8), and the legal drafts aren't published anywhere (AC-2.10).
 - **Performance** and load targets have not been measured.
 
 ### 17.2 Not built (planned for later phases)
 
-- **Phase 3:** the storage janitor; purging ended shares (and their links), download records and audit events; cleanup of inactive anonymous users; storage reconciliation; scheduled egress-list refresh; burn-after-download; a cron heartbeat.
 - **Phases 4–6:** accounts, Pro, password-protected links, private rooms with invites, QR pairing and room links, multipart uploads over 100 MB, billing, an optional web admin console (Phase 4); Team workspaces (Phase 5); malware scanning, ASN classification (Phase 6). Error monitoring with redaction is required by the public-beta gate ([05](05-implementation-roadmap.md)).
 - **Conditional on SP-04:** the dual-stack probe and binding.
 - **Operator tooling.** Takedowns, blocking a network, suspending a user and switching kill switches are SQL from the Supabase dashboard ([takedown](runbooks/takedown.md), [kill switches](runbooks/kill-switches.md)); there is no admin UI or endpoint.
@@ -1192,15 +1274,15 @@ Test maps: [09 §4.11](09-testing-strategy.md#411-phase-1-test-map-as-built-2026
 
 - **Local sharing misses some devices** (R5, RISK-013). The fallback is Link only plus a link, QR code or code (§9); it isn't automatic.
 - **Links are bearer secrets.** Anyone who gets a link can open its share until it expires or the creator turns it off; a download URL already handed out works for 60 seconds more (RISK-009).
-- **Takedown leaves the bytes** in storage until the next sweep, a manual delete, or the lifecycle rule (once applied); evidence preservation is not built (RISK-031). Nothing alerts a person to new reports (Q-022).
+- **Takedown holds the bytes** (D-2) until an operator releases the hold. R2's lifecycle rule (once applied) still deletes the original at class period + 1 day, so the janitor keeps a copy under `hold/`, which no rule covers. That is tested on RustFS only, and the legal procedure is open (RISK-031, Q-022). Nothing alerts a person to new reports (Q-022).
+- **One deletion executor** (RISK-034): bytes outlive access by about a minute, and a cancelled upload's URL can store unreachable bytes until the janitor tombstones the key.
 - **Code guessing across many networks** is limited only per network key and session, by Turnstile and by a global failure log event (RISK-030).
 - **Successful code resolutions are not limited** (only failures count): a valid code can create link sessions and grants without a limit of its own while it lives (RISK-032).
 - **Popular links wait.** The unlock limit counts every attempt, so the 31st new browser to open a link within 10 minutes gets `429` and waits (RISK-033).
 - **Split networks.** A household's IPv4 and IPv6 networks are separate (§6.2).
 - **One public IP is not always one network** (RISK-001). Separate networks can share a public IP; the egress lists and the device cap reduce this but cannot rule it out.
 - **Everyone on the same Wi-Fi sees local posts, guests included** (RISK-025). This is by design; the first-visit notice and the audience line say so.
-- **Storage cleanup is opportunistic** until the Phase 3 janitor (§7.6). Once applied to a bucket, the R2 lifecycle backstop will remove `d7/` objects after 8 days.
-- **Data accumulates.** Ended-share metadata, download records, audit events and anonymous Supabase users are not purged yet; their retention dates are set.
+- **Retention keeps evidence.** Reported shares and their records, and operator and report audit events, are never purged automatically (D-3), until the evidence policy (Q-022) says otherwise.
 - **Daily volume** is charged when an upload starts, before the storage quota is checked, and is not refunded if the upload fails or the quota refuses it (review L7).
 - **The Presence roster is reported by clients** (review L3, accepted). Only the count is shown.
 - **Realtime revocation lag** for ID-only signals (RISK-007).
@@ -1208,7 +1290,8 @@ Test maps: [09 §4.11](09-testing-strategy.md#411-phase-1-test-map-as-built-2026
 - **Ownership lives in browser storage.** Clearing site data loses edit and delete rights (§5.3).
 - **Device rows accumulate.** `POST /devices` creates a new row whenever the browser has no known device ID, and nothing revokes devices yet.
 - **Supabase Auth stores session IP addresses** (Q-031, RISK-029). This is **not solved**: the privacy draft states it, but there is no retention job or session time-box.
-- **Logging and monitoring.** The logger is a minimal JSON writer, and there is no error monitoring.
+- **Logging and monitoring.** The logger is a minimal JSON writer, and there is no error monitoring. Job health is exposed on `/health/cron` for an external monitor (D-5).
+- **Ledger reconciliation** covers at most 1,000 subjects per daily run (rotating) in one transaction (DV3-11).
 
 ### 17.4 Open owner decisions
 
@@ -1220,9 +1303,10 @@ Test maps: [09 §4.11](09-testing-strategy.md#411-phase-1-test-map-as-built-2026
   - Q-029: the cap of 50 devices.
   - Q-030: the expiry options.
 - **Answered by the owner for Phase 2 on 2026-10-16** ([phase 2 §19.1](phases/phase-2-remote-sharing.md#191-decisions-applied)): Q-010 (executables, scripts, installers and disk images blocked in Free links), Q-011 (no ads in Phase 2), Q-027 (the limits as implemented), Q-028 (a link exposes only its share), the link lifetime (never past the share) and abuse handling without alert delivery.
-- **Q-022:** the named operator for abuse reports, the alert channel (none exists), and the legal contact on the legal pages.
+- **Answered for Phase 3 on 2026-10-16** ([phase 3 §18](phases/phase-3-expiry-one-time-download.md#18-implementation-2026-10-16)): Q-008 (burn after download: Pro at paid launch, Free through the `free_burn_after_download` flag during beta) and D-1 … D-9.
+- **Q-022:** the named operator for abuse reports, the alert channel and recipient (none exists; Phase 3's uptime-monitor design needs one), the evidence-retention policy for held and reported content, and the legal contact on the legal pages.
 - **Q-031:** what to do about Supabase Auth storing session IPs.
-- **Copy sign-off (AC-1.12):** the first-visit notice, the risky-download and network-off texts, and the screenshots; for Phase 2, the share-page, dialog and legal-draft texts.
+- **Copy sign-off (AC-1.12):** the first-visit notice, the risky-download and network-off texts, and the screenshots; for Phase 2, the share-page, dialog and legal-draft texts; for Phase 3, every OWNER REVIEW string in `components/burn/copy.ts` (AC-3.8).
 - **Infrastructure and setup questions:**
   - Q-020: product name and domains.
   - Q-016: markets and regions.
@@ -1241,8 +1325,8 @@ From the phase documents and the [README](README.md) status board, 2026-10-16:
 |---|---|---|
 | 0 — Architecture and foundation | **BLOCKED on owner items** | In-repo work done and verified locally (2026-09-29). Waiting on: branch protection and a first green CI run, hosting (SP-01), Supabase and R2 accounts, spikes SP-01 … SP-04, the decision review ([phase 0 §18.3](phases/phase-0-foundation.md#183-acceptance-criteria-status)). |
 | 1 — Anonymous local sharing | **NEEDS REVIEW** | Implemented and tested on the local stack (2026-10-15). Not VERIFIED: AC-1.3 (T-009), 1.6, 1.8, 1.9, 1.11 and 1.12 are blocked on staging, real devices or the owner ([phase 1 §18.3](phases/phase-1-local-sharing.md#183-acceptance-criteria-status)). The code is committed on branch `phase-1-local-sharing` and not merged into `main`. |
-| 2 — Remote secure sharing | **CODE COMPLETE / NEEDS REVIEW** | Implemented and tested on the local stack (2026-10-15; owner decisions applied and re-tested 2026-10-16), on branch `phase-2-remote-sharing`, **not committed**. Not VERIFIED: real-device QR scans (AC-2.6), the takedown rehearsal (AC-2.8) and legal pages on staging (AC-2.10) need staging, phones or the owner ([phase 2 §18.3](phases/phase-2-remote-sharing.md#183-acceptance-criteria-status)). Started before Phase 1 was VERIFIED, on the owner's instruction. |
-| 3 — Expiry, cleanup, one-time download | PLANNED — not started | |
+| 2 — Remote secure sharing | **CODE COMPLETE / NEEDS REVIEW** | Implemented and tested on the local stack (2026-10-15; owner decisions applied and re-tested 2026-10-16), committed and pushed by the owner on branch `phase-2-remote-sharing` (`3e03120`), not merged. Not VERIFIED: real-device QR scans (AC-2.6), the takedown rehearsal (AC-2.8) and legal pages on staging (AC-2.10) need staging, phones or the owner ([phase 2 §18.3](phases/phase-2-remote-sharing.md#183-acceptance-criteria-status)). Started before Phase 1 was VERIFIED, on the owner's instruction. |
+| 3 — Expiry, cleanup, one-time download | **CODE COMPLETE / NEEDS REVIEW** | Implemented and tested on the local stack (2026-10-16) on branch `phase-3-expiry-one-time-download`, **not committed**. Not VERIFIED: staging (janitor go-live, latency, soak, chaos with alerts, restore drill), real phones (burn flow), the owner (copy review, alert recipient, evidence policy) ([phase 3 §18](phases/phase-3-expiry-one-time-download.md#18-implementation-2026-10-16)). Started before Phase 2 was VERIFIED, on the owner's instruction. |
 | 4 — Accounts, Pro, billing | PLANNED — not started | |
 | 5 — Team workspaces | PLANNED — not started | |
 | 6 — Production hardening | PLANNED — not started | |
@@ -1251,16 +1335,16 @@ From the phase documents and the [README](README.md) status board, 2026-10-16:
 
 A phase is VERIFIED only when every acceptance criterion is met at the level it names (CI, staging, a real device, the owner). Passing tests on a developer machine is the lowest level, not the goal. **No phase is VERIFIED.**
 
-| Level | Meaning | Phase 0 | Phase 1 | Phase 2 |
-|---|---|---|---|---|
-| Implemented locally | The code exists and runs against the local stack | ✅ | ✅ committed on `phase-1-local-sharing` | ✅ uncommitted on `phase-2-remote-sharing` |
-| Automated-test verified | Typecheck, lint, unit, component, pgTAP, API integration and E2E pass on the local stack (Supabase, RustFS, `next start`) | ✅ 2026-09-29 | ✅ 2026-10-15, and again on the Phase 2 branch 2026-10-16 | ✅ 2026-10-16 |
-| CI verified | The GitHub Actions workflow passes on a pull request | ❌ its one run (2026-09-29) failed | ❌ never run | ❌ never run |
-| Staging verified | Checked on a deployed staging environment behind Cloudflare, with real R2 and Turnstile | ❌ no staging exists | ❌ | ❌ |
-| Real-device verified | Checked on physical phones and real networks | — | ❌ emulated phones only | ❌ QR codes decoded in tests, never scanned by a phone |
-| Production verified | Running and checked in production | ❌ nothing deployed | ❌ | ❌ |
+| Level | Meaning | Phase 0 | Phase 1 | Phase 2 | Phase 3 |
+|---|---|---|---|---|---|
+| Implemented locally | The code exists and runs against the local stack | ✅ | ✅ committed on `phase-1-local-sharing` | ✅ committed on `phase-2-remote-sharing` (`3e03120`) | ✅ uncommitted on `phase-3-expiry-one-time-download` |
+| Automated-test verified | Typecheck, lint, unit, component, pgTAP, API integration and E2E pass on the local stack (Supabase, RustFS, `next start`; Phase 3 also the edge runtime) | ✅ 2026-09-29 | ✅ 2026-10-15, and again on the Phase 2 and 3 branches 2026-10-16 | ✅ 2026-10-16, and again on the Phase 3 branch | ✅ 2026-10-16 |
+| CI verified | The GitHub Actions workflow passes on a pull request | ❌ its one run (2026-09-29) failed | ❌ never run | ❌ never run | ❌ never run |
+| Staging verified | Checked on a deployed staging environment behind Cloudflare, with real R2 and Turnstile | ❌ no staging exists | ❌ | ❌ | ❌ (janitor, latency, soak, chaos, restore drill) |
+| Real-device verified | Checked on physical phones and real networks | — | ❌ emulated phones only | ❌ QR codes decoded in tests, never scanned by a phone | ❌ burn flow on emulated phones only |
+| Production verified | Running and checked in production | ❌ nothing deployed | ❌ | ❌ | ❌ (kill switches, backups, monitoring) |
 
-Phase 2's open items at each level: [phase 2 §19.5](phases/phase-2-remote-sharing.md#195-verification-levels-and-what-blocks-verified).
+Phase 2's open items at each level: [phase 2 §19.5](phases/phase-2-remote-sharing.md#195-verification-levels-and-what-blocks-verified). Phase 3's: [phase 3 §18](phases/phase-3-expiry-one-time-download.md#18-implementation-2026-10-16) (§18.9–§18.10).
 
 ---
 
@@ -1300,6 +1384,10 @@ Then update the affected sections above and the "Checked against" line at the to
 | 2026-10-15 | A second trust boundary: link viewers | Every API caller was a Supabase user with a device → link viewers are browsers with only an httpOnly session cookie and grants, never a Supabase user or Realtime connection (§5.3, §9.3) | RISK-006; 03 §4.2 | `links/{cookies,sessions,grants}.ts`, viewer endpoints | New environment variables `LINK_PEPPER`, `CODE_PEPPER` (required in deployments) |
 | 2026-10-15 | Providers per route group | One root layout with the app's providers → root (config, nonce), `(app)` (Supabase runtime), `(share)` (query client only), `(legal)` (none) (§4.4) | Share pages must never start a Supabase session (phase 2 DV2-12) | `app/layout.tsx`, `app/(app)/layout.tsx`, `app/(share)/layout.tsx`, `lib/client/providers.tsx`; `app/page.tsx` moved to `app/(app)/page.tsx` | URLs unchanged |
 | 2026-10-15 | Server-side Turnstile | Only Supabase Auth verified Turnstile → the server also verifies it for code guessing and reports (§13) | Phase 2 escalation and report intake (DV2-6) | `security/turnstile.ts`, `links/codes.ts`, `abuse/reports.ts` | `TURNSTILE_SECRET_KEY` required in deployments |
+| 2026-10-16 | Server code outside Next.js; deletion moves to the janitor (Phase 3) | The web tier deleted and tombstoned objects in request paths (plus an `after()` sweep) → a Supabase Edge Function, `storage-janitor`, is the one deletion executor, triggered by pg_cron through pg_net with a Vault secret; new roles `app_janitor` and `app_egress_loader`; a new trust boundary pg_cron → function (§7.6, §11, §13) | DEC-016, DEC-017; owner decisions D-1, D-2, D-8; C-2, C-4; [phase 3 §18](phases/phase-3-expiry-one-time-download.md#18-implementation-2026-10-16) | `supabase/functions/*`, `lib/server/shares/{end,complete}.ts`, `lib/server/storage/s3.ts`, `scripts/local-stack.cjs`, `supabase/{config.toml,seed.sql}`; tables `job_heartbeats`, `storage_reconcile_runs`; outbox columns | Migration `20261016120000_phase3_janitor.sql`. Deployments must deploy the function, set its secrets, enable `app_janitor` and create the Vault secrets **before** or with the app release, or deletions wait (access is unaffected). `claim_object_deletions` revoked from `app_server`. |
+| 2026-10-16 | Burn after download (Phase 3) | `claimed` and `consumed` were reserved statuses → burn shares, claims, grace, Reveal and confirm-received; visibility and link-viewer access gain claimant rules; DTOs gain optional `burn` and `downloadsLeft` (§7.8) | DEC-015, DEC-018, Q-008, D-6, D-7 | `lib/server/shares/{burn,download,read,dto,create,text}.ts`, `lib/server/links/{grants,viewer,unlock,create}.ts`, `lib/server/local/visibility.ts`, `components/burn/*`, six new routes | Migration `20261016120100_phase3_burn.sql` (additive). Non-burn DTOs are unchanged; `free_burn_after_download` defaults off. |
+| 2026-10-16 | Retention, reconciliation and job health (Phase 3) | Nothing purged ended data or users; no job health → purge, cleanup and reconciliation jobs with heartbeats, `/health/cron` for an external monitor, the egress refresh on GitHub Actions (§10.6) | DEC-016, DEC-019, DEC-029; D-3, D-4, D-5, D-9 | `app.run_job` and the job functions, `lib/server/jobs/health.ts`, `.github/workflows/refresh-egress-ranges.yml`, `scripts/load-egress-ranges.cjs` | Migration `20261016120200_phase3_retention.sql`. The egress workflow is off until `EGRESS_REFRESH_ENABLED` and its environment secrets exist. |
+| 2026-10-16 | Security review of the Phase 3 janitor | R2's lifecycle rules would delete legally held objects at their class period + 1 day → the janitor copies held objects to `hold/<key>` (no rule) and deletes both after the release. The token and injected-key findings are documented as residual risks. | D-2; RISK-031, RISK-036, RISK-037 | `supabase/migrations/20261016120000_phase3_janitor.sql`, `…120200_phase3_retention.sql`, `supabase/functions/_shared/{janitor-core,s3-fetch}.ts` | [Phase 3 §18.13](phases/phase-3-expiry-one-time-download.md#1813-security-review-2026-10-16). Not verified on real R2. |
 
 ---
 
@@ -1314,7 +1402,9 @@ The planning documents (00–10) describe the target design. These are the impor
 | Network classification | Egress lookup in SQL with the client address; daily list refresh from Phase 3 | Prefix-only lookup (/24 or /48) with the exact match in the app; manual weekly loading; deployments fail closed when the lists are stale | DV1-19, DV1-23 |
 | Large-network cap | `NETWORK_LARGE_CAP` environment variable | Runtime flag `network_large_cap` | DV1-5 |
 | Upload signing | Type, disposition and cache headers signed; size checked after upload | Also signs `Content-Length` and `If-None-Match: *` (write-once); completion compares stored headers | DV1-15, DV1-18 |
-| Deleting objects | Outbox executed by the Phase 3 janitor; Phase 1 relies on the lifecycle backstop | Executed from the API after deletes and rejections, with a small `after()` sweep and tombstones while upload URLs may be live | DV1-21, DV1-22 |
+| Deleting objects | Outbox executed by the Phase 3 janitor; Phase 1 relies on the lifecycle backstop | Phase 1–2: executed from the API after deletes and rejections. **Since Phase 3: the storage janitor only (as planned, D-1).** | DV1-21, DV1-22 |
+| Egress refresh | Phase 3: an Edge Function or a fallback | GitHub Actions running the existing script (P3-00: the merge needs about 4 s of CPU) | DV3-1 |
+| Claim link column | `claimed_link_session_id`, `claimed_link_id` with a foreign key | `claimed_link_session_hash`; `claimed_link_id` as a checked plain column | C-8, DV3-2 |
 | Multi-file shares | Not specified | All or nothing: one failed file fails the share | DV1-10 |
 | Local object storage | MinIO | RustFS (MinIO no longer publishes images) | DV1-4 |
 | Public configuration | `NEXT_PUBLIC_*` inlined at build time | Passed from the root layout at request time | DV1-8 |

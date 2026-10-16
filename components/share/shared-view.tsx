@@ -1,7 +1,7 @@
 "use client";
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Copy, Download, FileText, Flag } from "lucide-react";
+import { Copy, Download, Eye, FileText, Flag } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { Badge } from "@/components/ui/badge";
@@ -13,7 +13,9 @@ import { queryKeys } from "@/lib/client/queries/keys";
 import { viewerContentQuery, viewerPreviewQuery } from "@/lib/client/queries/links";
 import type { ApiClient } from "@/lib/client/api-client";
 import { createViewerApiClient } from "@/lib/client/viewer-api";
-import { downloadUrlResponse, viewerContentResponse, type ViewerContent, type ViewerFileDto } from "@/lib/shared/api/schemas";
+import { downloadUrlResponse, revealResponse, viewerContentResponse, type ViewerContent, type ViewerFileDto } from "@/lib/shared/api/schemas";
+import { BurnConfirmDialog } from "../burn/burn-confirm-dialog";
+import { BURN, burnErrorText, formatClock } from "../burn/copy";
 import { RISK_LABELS } from "../local/copy";
 import { expiresIn, formatBytes } from "../local/format";
 import { LinkedText } from "../local/linked-text";
@@ -32,6 +34,10 @@ import { REMOTE_RISK_WARNING, VIEWER_STATES } from "./copy";
  * Without a fragment (a reload, or arriving from the code page) the grant alone is tried.
  * A 404 or 410 replaces everything cached for the link (DEC-034 rule 4). The phase shown is
  * derived from the unlock result and the content query; no state mirrors it.
+ *
+ * Burn after download (Phase 3): the first Download or Reveal, after a confirmation, claims the
+ * share for this browser. A revealed text stays in component state only. Others who hold the link
+ * see "already downloaded" (410 ALREADY_DOWNLOADED), and so does the claimant once it's gone.
  */
 
 type Phase = "opening" | "ready" | keyof typeof VIEWER_STATES;
@@ -39,6 +45,7 @@ const NO_FRAGMENT = { secret: null, report: false };
 
 function phaseFor(error: unknown, hadSecret: boolean): Phase {
   if (error instanceof ApiRequestError) {
+    if (error.code === "ALREADY_DOWNLOADED") return (error.details as { byYou?: boolean } | undefined)?.byYou ? "downloadedByYou" : "downloaded";
     if (error.status === 410) return "expired";
     if (error.status === 404) return hadSecret ? "unavailable" : "incomplete";
     if (error.code === "REMOTE_LINKS_DISABLED") return "paused";
@@ -67,45 +74,97 @@ function Preview({ api, linkId, file }: { api: ApiClient; linkId: string; file: 
 }
 
 function SharedContent({ api, content }: { api: ApiClient; content: ViewerContent }) {
+  const queryClient = useQueryClient();
   const [risky, setRisky] = useState<ViewerFileDto | null>(null);
   const [reporting, setReporting] = useState(false);
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [claiming, setClaiming] = useState<{ kind: "file"; file: ViewerFileDto } | { kind: "text" } | null>(null);
+  const [revealed, setRevealed] = useState<{ content: string; left: number } | null>(null);
   const linkId = content.link.id;
+  const burn = content.share.burn;
+  // The claimant's retries need no second confirmation.
+  const claims = !!burn && !burn.byYou;
+  const text = content.share.text?.content ?? revealed?.content ?? null;
+  const refresh = () => void queryClient.invalidateQueries({ queryKey: queryKeys.linkContent(linkId) });
 
-  const download = async (file: ViewerFileDto) => {
+  const download = async (file: ViewerFileDto, confirmed = false) => {
     setError(null);
     try {
       const { url } = await api.request("POST", `/api/v1/links/${linkId}/files/${file.id}/download-url`, {
-        body: {},
+        body: burn && (confirmed || burn.byYou) ? { confirm: true } : {},
         schema: downloadUrlResponse,
       });
+      if (burn) refresh();
       // Content-Disposition: attachment (signed at upload), so this downloads in place.
       window.location.assign(url);
     } catch (e) {
+      if (burnErrorText(e)) refresh();
       setError(e instanceof ApiRequestError && e.code === "LINK_DAILY_LIMIT"
         ? "This link has reached its download limit for today. Try again tomorrow."
-        : "Couldn't start the download. Try again.");
+        : (burnErrorText(e) ?? "Couldn't start the download. Try again."));
     }
+  };
+
+  const startDownload = (file: ViewerFileDto) => (claims ? setClaiming({ kind: "file", file }) : void download(file));
+
+  const reveal = async () => {
+    setError(null);
+    try {
+      const result = await api.request("POST", `/api/v1/links/${linkId}/reveal`, { body: { confirm: true }, schema: revealResponse });
+      setRevealed({ content: result.text.content, left: result.burn.left });
+      refresh();
+    } catch (e) {
+      if (burnErrorText(e)) refresh();
+      setError(burnErrorText(e) ?? "Something went wrong. Try again.");
+    }
+  };
+
+  const confirmReceived = async () => {
+    setError(null);
+    try {
+      await api.request("POST", `/api/v1/links/${linkId}/confirm-received`, { body: {} });
+    } catch {
+      setError("Something went wrong. Try again.");
+    }
+    refresh();
   };
 
   return (
     <Card data-testid="shared-content">
       <CardHeader className="flex flex-row items-center justify-between gap-2">
         <p className="text-sm font-medium">Shared with you</p>
-        <Badge variant="secondary">{expiresIn(content.link.expiresAt)}</Badge>
+        <span className="flex gap-1">
+          {burn && (
+            <Badge variant="destructive" data-testid="burn-badge">
+              {BURN.badge}
+            </Badge>
+          )}
+          <Badge variant="secondary">{expiresIn(content.link.expiresAt)}</Badge>
+        </span>
       </CardHeader>
       <CardContent className="space-y-3">
-        {content.share.text && (
+        {burn?.textHidden && text === null && (
+          <Button size="sm" onClick={() => (claims ? setClaiming({ kind: "text" }) : void reveal())} data-testid="burn-reveal">
+            <Eye aria-hidden />
+            {BURN.reveal}
+          </Button>
+        )}
+        {text !== null && (
           <>
             <div data-testid="shared-text">
-              <LinkedText text={content.share.text.content} />
+              <LinkedText text={text} />
             </div>
+            {revealed && (
+              <p className="text-xs text-muted-foreground" data-testid="reveals-left">
+                {BURN.revealsLeft(revealed.left)}
+              </p>
+            )}
             <Button
               size="sm"
               variant="outline"
               onClick={() =>
-                void navigator.clipboard.writeText(content.share.text?.content ?? "").then(() => {
+                void navigator.clipboard.writeText(text).then(() => {
                   setCopied(true);
                   setTimeout(() => setCopied(false), 1500);
                 })
@@ -130,13 +189,15 @@ function SharedContent({ api, content }: { api: ApiClient; content: ViewerConten
                         {RISK_LABELS[flag] ?? flag}
                       </Badge>
                     ))}
+                    {file.downloadsLeft !== undefined && <span data-testid="downloads-left">{BURN.downloadsLeft(file.downloadsLeft)}</span>}
                   </p>
                 </div>
                 <Button
                   variant="outline"
                   size="sm"
                   aria-label={`Download ${file.name}`}
-                  onClick={() => (file.riskFlags.length > 0 ? setRisky(file) : void download(file))}
+                  disabled={file.downloadsLeft === 0}
+                  onClick={() => (file.riskFlags.length > 0 ? setRisky(file) : startDownload(file))}
                 >
                   <Download aria-hidden />
                   Download
@@ -144,6 +205,14 @@ function SharedContent({ api, content }: { api: ApiClient; content: ViewerConten
               </li>
             ))}
           </ul>
+        )}
+        {burn?.claimed && burn.byYou && (
+          <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-muted p-2" data-testid="burn-claimant">
+            <p className="text-xs">{burn.availableUntil && BURN.availableUntil(formatClock(burn.availableUntil))}</p>
+            <Button size="sm" variant="outline" onClick={() => void confirmReceived()} data-testid="burn-got-it">
+              {BURN.gotIt}
+            </Button>
+          </div>
         )}
         <p className="text-xs text-muted-foreground">Your access on this device ends {expiresIn(content.access.expiresAt).replace("Expires in", "in")}.</p>
         <Button size="sm" variant="ghost" onClick={() => setReporting(true)}>
@@ -168,7 +237,7 @@ function SharedContent({ api, content }: { api: ApiClient; content: ViewerConten
               onClick={() => {
                 const file = risky;
                 setRisky(null);
-                if (file) void download(file);
+                if (file) startDownload(file);
               }}
             >
               {REMOTE_RISK_WARNING.confirm}
@@ -176,6 +245,17 @@ function SharedContent({ api, content }: { api: ApiClient; content: ViewerConten
           </DialogFooter>
         </DialogContent>
       </Dialog>
+      <BurnConfirmDialog
+        open={claiming !== null}
+        action={claiming?.kind === "text" ? "reveal" : "download"}
+        onCancel={() => setClaiming(null)}
+        onConfirm={() => {
+          const pending = claiming;
+          setClaiming(null);
+          if (pending?.kind === "file") void download(pending.file, true);
+          else if (pending?.kind === "text") void reveal();
+        }}
+      />
       <ReportDialog api={api} target={{ type: "link", linkId }} open={reporting} onOpenChange={setReporting} />
     </Card>
   );

@@ -16,6 +16,13 @@ export type RuntimeFlags = {
   remoteLinksEnabled: boolean;
   /** Phase 2: creating and resolving short codes. */
   shortCodesEnabled: boolean;
+  /** Phase 3: creating new burn-after-download shares (existing ones keep working). */
+  burnAfterDownloadEnabled: boolean;
+  /**
+   * Phase 3 (Q-008): the Free plan may create burn-after-download shares during beta and testing.
+   * Unlike the kill switches, a missing row means OFF.
+   */
+  freeBurnAfterDownload: boolean;
   /** Value of the egress_ranges flag ({ loadedAt, rows }), set by the list loader. */
   egressRanges: unknown;
 };
@@ -35,6 +42,8 @@ export async function getRuntimeFlags(env: Env): Promise<RuntimeFlags> {
       "anonymous_uploads_enabled",
       "remote_links_enabled",
       "short_codes_enabled",
+      "burn_after_download_enabled",
+      "free_burn_after_download",
       "egress_ranges",
     ])
     .execute();
@@ -45,6 +54,8 @@ export async function getRuntimeFlags(env: Env): Promise<RuntimeFlags> {
     anonymousUploadsEnabled: enabled("anonymous_uploads_enabled"),
     remoteLinksEnabled: enabled("remote_links_enabled"),
     shortCodesEnabled: enabled("short_codes_enabled"),
+    burnAfterDownloadEnabled: enabled("burn_after_download_enabled"),
+    freeBurnAfterDownload: rows.find((r) => r.key === "free_burn_after_download")?.enabled ?? false,
     egressRanges: rows.find((r) => r.key === "egress_ranges")?.value ?? null,
   };
   cached = { flags, at: Date.now() };

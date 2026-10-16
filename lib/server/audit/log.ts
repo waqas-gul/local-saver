@@ -16,7 +16,8 @@ export type AuditEvent = {
     | "link.code_created"
     | "code.resolve_failed"
     | "code.resolve_blocked"
-    | "report.created";
+    | "report.created"
+    | "burn.confirmed";
   /** A device of an (anonymous) user, a link viewer (no user), or the system. */
   actorKind?: "device" | "link_viewer" | "system";
   actorUserId?: string | null;

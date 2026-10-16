@@ -57,6 +57,10 @@ export function uploadErrorMessage(error: unknown): string {
         return "Programs, scripts, installers and disk images can't be shared by link.";
       case "REMOTE_LINKS_DISABLED":
         return "Sharing by link is paused right now.";
+      // OWNER REVIEW (phase 3 §17.9): burn errors at posting.
+      case "FEATURE_NOT_IN_PLAN":
+      case "BURN_AFTER_DOWNLOAD_DISABLED":
+        return "Burn after download isn't available right now.";
     }
   }
   return error instanceof Error ? error.message : "Upload failed.";
@@ -69,6 +73,8 @@ export async function uploadFiles(options: {
   expiresIn: number;
   /** This network, or Link only (DEC-033). */
   destination?: "network" | "link_only";
+  /** Phase 3: burn after download (entitlement-gated on the server). */
+  burnAfterDownload?: boolean;
   uploads: StoreApi<UploadsState>;
   onFinished: () => void;
 }): Promise<ShareDto | null> {
@@ -85,6 +91,7 @@ export async function uploadFiles(options: {
       body: {
         destination,
         expiresIn,
+        ...(options.burnAfterDownload ? { burnAfterDownload: true } : {}),
         files: files.map((f) => ({ name: f.name, size: f.size, type: f.type || "application/octet-stream" })),
       },
       schema: createFileShareResponse,

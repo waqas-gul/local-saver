@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
 import { expectPhoneLayout, feed, fitsScreen, newNetwork, openDevice, PNG_1X1, postText, unique } from "./support/local-devices";
+import { closeAdminDb, expectFreeBurnOn } from "./support/remote";
 
 /**
  * Emulated phones: Playwright's "iPhone 15" (WebKit) and "Pixel 7" (Chromium) profiles, set by
@@ -49,4 +50,31 @@ test("a phone posts text, an image and a document; another phone on the network 
   expect(await fitsScreen(b.page)).toBe(true);
   expect(await a.cspViolations()).toEqual([]);
   expect(await b.cspViolations()).toEqual([]);
+});
+
+test("phone layout: the burn-after-download confirmation fits the screen, buttons in reach (emulated, Phase 3)", async ({ browser }) => {
+  // Switched on once for the whole run by the E2E global setup, so parallel runs can't race over it.
+  await expectFreeBurnOn();
+  try {
+    const net = newNetwork();
+    const a = await openDevice(browser, net.ip());
+    const b = await openDevice(browser, net.ip());
+    const note = unique("burn on a phone");
+    await a.page.getByTestId("composer-burn").check();
+    await a.page.getByTestId("composer-text").fill(note);
+    await a.page.getByTestId("composer-submit").click();
+    await feed(b).getByTestId("burn-reveal").first().click({ timeout: 10_000 });
+    const dialog = b.page.getByTestId("burn-confirm");
+    await expect(dialog).toBeVisible();
+    const box = await dialog.boundingBox();
+    const viewport = b.page.viewportSize();
+    expect(box && viewport && box.x >= 0 && box.x + box.width <= viewport.width && box.y + box.height <= viewport.height).toBe(true);
+    await expect(b.page.getByTestId("burn-confirm-button")).toBeInViewport();
+    await expect(b.page.getByRole("button", { name: "Cancel" })).toBeInViewport();
+    expect(await fitsScreen(b.page)).toBe(true);
+    await b.page.getByRole("button", { name: "Cancel" }).click();
+    await expect(dialog).toHaveCount(0);
+  } finally {
+    await closeAdminDb();
+  }
 });

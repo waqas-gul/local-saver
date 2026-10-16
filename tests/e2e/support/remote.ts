@@ -106,4 +106,13 @@ export async function closeAdminDb() {
   pool = undefined;
 }
 
+/**
+ * The burn specs need Free burn after download on. Global setup switches it on once for the
+ * whole run (tests/e2e/support/global-setup.ts); tests only read it, so parallel files can't race.
+ */
+export async function expectFreeBurnOn(): Promise<void> {
+  const { rows } = await adminDb().query("select enabled from app.runtime_flags where key = 'free_burn_after_download'");
+  expect(rows[0]?.enabled, "free_burn_after_download must be on: the E2E global setup sets it").toBe(true);
+}
+
 export const linkIdOf = (url: string) => new URL(url).pathname.split("/").pop() ?? "";

@@ -47,7 +47,7 @@ Write your own name and a short reason; both go into the audit trail.
 
 ```sql
 -- Block a share: ends it as 'blocked', revokes every link and short code, erases text,
--- queues its files for deletion, resolves its open reports, writes admin.block.
+-- puts its files on legal hold (Phase 3, D-2), resolves its open reports, writes admin.block.
 select app.admin_block_share('<share id>', '<reason>', '<your name>', '<report id or null>');
 
 -- Block one link: revokes it and its short code, resolves its open reports, writes admin.block.
@@ -61,17 +61,36 @@ update app.abuse_reports
 
 Access ends **on the next request** (request-time checks). Download URLs already handed out stay valid for at most 60 seconds (300 for image previews), RISK-009.
 
-## 4. Storage: deleting the bytes
+## 4. Storage: the objects are held (Phase 3, D-2)
 
-`admin_block_share` returns `objects`: each queued object key, with `holdUntil` when an upload URL for it may still be live.
+`admin_block_share` returns `objects`: each object key with `legalHold: true`, `holdCopy` (`pending` until the janitor copies it), and `holdUntil` when an upload URL for it may still be live.
 
-- The deletion outbox is executed only by the app's storage sweep, which runs after a creator deletes a share or an upload is rejected (Phase 1 as built). **There is no scheduled janitor until Phase 3**, so a blocked share's files can stay in R2 until the next sweep, or until the lifecycle rule (8 days for `d7/`) once it is applied.
-- When the bytes must go now, delete each object key in the Cloudflare R2 dashboard **after** its `holdUntil` (if any). Deleting earlier would free the key while an upload URL could still write to it (03 §7.7).
+- **Since Phase 3 a takedown holds the objects instead of deleting them** (owner decision D-2, evidence preservation).
+  - The share's outbox rows get `legal_hold = true`, `hold_reason = 'takedown'`.
+  - The storage janitor never deletes held rows. The tombstone purge never removes the share, or any share with a report (D-3).
+  - Within a minute the janitor copies each held object to `hold/<key>`, a prefix no R2 lifecycle rule covers ([janitor](janitor.md) §6). **Check it:** the held-rows query in [janitor](janitor.md) §3 should show `copied`. `pending` after a few minutes means the janitor isn't running. `unavailable` means the object was already gone: note it in the case.
+  - This also applies to a share that had already ended before the takedown: its open rows are held too.
+- Access ends at once whatever happens to the bytes (§3).
+- **Release the hold** only once legal review allows deletion. The janitor then deletes the objects and their copies on its next run:
+
+  ```sql
+  select app.admin_release_hold('<share id>', '<why: ticket, legal ok>', '<your name>');
+  ```
+
+- **R2's lifecycle rules ignore holds.** Once applied, they delete the original at its class period + 1 day (8 days for `d7/`). The `hold/` copy is what survives, until the release. This is not yet confirmed on real R2 ([manual procedure](../phases/phase-3-manual-verification.md) S-6): until it is, also note each object key and its lifecycle date in the case.
+- Final legal retention is an operational and legal responsibility (Q-022): the code holds, it doesn't decide how long.
+- Before Phase 3 (Phase 2 as built), the bytes stayed until a request-path sweep, and this step deleted them by hand. Don't do that any more: release the hold instead.
 
 ## 5. Child sexual abuse material
 
 - Act at once: block the share (step 3).
-- **Evidence preservation is not built.** Blocking queues the files for deletion, and legal duties may require preserving evidence and reporting to the authorities (for example NCMEC in the US). Until legal advice (Q-022) defines the procedure, do not delete objects by hand; note the object keys and escalate to the owner. Tracked as RISK-031.
+- **Evidence is held, not destroyed** (Phase 3, D-2): blocking puts the files on legal hold (§4), and the share and its reports are kept (D-3).
+- Legal duties may require preserving evidence and reporting to the authorities (for example NCMEC in the US). That procedure needs legal advice (Q-022). Until it exists:
+  - don't release the hold;
+  - check that every held object is `copied` (§4); note the object keys, and the lifecycle date of any that aren't;
+  - escalate to the owner.
+
+  Tracked as RISK-031.
 
 ## 6. Repeat abuse
 

@@ -1,0 +1,47 @@
+# Daily refresh of the Apple Private Relay and Tor egress lists (DV1-19, phase 3 §17.6, D-4).
+#
+# P3-00 measured the existing merge at about 4 s of CPU, twice the Edge Function limit, so it runs
+# here instead, unchanged: scripts/load-egress-ranges.cjs, connecting as the least-privilege
+# app_egress_loader role (it may only call app.replace_egress_ranges).
+#
+# Off until an environment is set up: set the repository variable EGRESS_REFRESH_ENABLED=true and,
+# in each GitHub environment (staging, production), the secret EGRESS_LOADER_DATABASE_URL (the
+# Supavisor URL for app_egress_loader). A failed run is reported by GitHub's scheduled-workflow
+# emails, and /api/v1/health/cron reports egressLists: stale after 3 days (janitor runbook).
+name: Refresh egress ranges
+
+on:
+  schedule:
+    - cron: "20 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: refresh-egress-ranges
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    if: ${{ vars.EGRESS_REFRESH_ENABLED == 'true' }}
+    name: Refresh (${{ matrix.environment }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        environment: [staging, production]
+    environment: ${{ matrix.environment }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Load the lists
+        env:
+          LOADER_DATABASE_URL: ${{ secrets.EGRESS_LOADER_DATABASE_URL }}
+        run: node scripts/load-egress-ranges.cjs

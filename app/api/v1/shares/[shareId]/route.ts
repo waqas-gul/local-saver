@@ -21,6 +21,6 @@ export const DELETE = withApi<Ctx>(async ({ request, env, ctx }) => {
   const caller = await requireCaller(request, env);
   const { shareId } = await ctx.params;
   const network = await currentNetwork(request, env);
-  await deleteShare(caller, network, shareId, env);
+  await deleteShare(caller, network, shareId);
   return new Response(null, { status: 204 });
 });

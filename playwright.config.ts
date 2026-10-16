@@ -64,6 +64,8 @@ function stackServer() {
       // Phase 2 remote links and codes. No Turnstile here: reports and code checks run without it.
       LINK_PEPPER: LOCAL.linkPepper,
       CODE_PEPPER: LOCAL.codePepper,
+      // Phase 3: global setup turns free_burn_after_download on for the run; apply flags at once.
+      RUNTIME_FLAGS_CACHE_SECONDS: "0",
       LOG_LEVEL: "warn",
     } as Record<string, string>,
   };
@@ -73,6 +75,8 @@ const stack = stackServer();
 
 export default defineConfig({
   testDir: "tests/e2e",
+  // Shared runtime flags are set once here, never per file: parallel files would race over them.
+  globalSetup: "./tests/e2e/support/global-setup.ts",
   fullyParallel: true,
   forbidOnly: isCI,
   retries: isCI ? 1 : 0,

@@ -36,6 +36,19 @@ describe("lifecycle backstop (infra/r2/lifecycle.json, 04 §8.2)", () => {
     expect(expiring.map((r) => r.Filter.Prefix).sort()).toEqual(["d30/", "d7/", "d90/"]);
     expect(rules.find((r) => r.AbortIncompleteMultipartUpload)?.AbortIncompleteMultipartUpload?.DaysAfterInitiation).toBe(1);
   });
+
+  it("never expires legal-hold copies: no expiring rule reaches hold/ (D-2, RISK-031)", () => {
+    // The janitor copies each held object to hold/<key>; only an operator's release deletes it.
+    for (const cls of ["d7", "d30", "d90", "ws"]) {
+      const copy = `hold/${cls}/2026/10/16/00000000-0000-4000-8000-000000000001`;
+      expect(expiring.filter((r) => copy.startsWith(r.Filter.Prefix)), copy).toEqual([]);
+    }
+    // Every rule is filtered by prefix; only the multipart rule may cover the whole bucket.
+    for (const rule of rules) {
+      expect(typeof rule.Filter?.Prefix, rule.ID).toBe("string");
+      if (rule.Filter.Prefix === "") expect(Object.keys(rule).sort(), rule.ID).toEqual(["AbortIncompleteMultipartUpload", "Filter", "ID", "Status"]);
+    }
+  });
 });
 
 describe("bucket CORS (infra/r2/cors.*.json, 08 §6)", () => {

@@ -32,8 +32,11 @@ select is(
   (select count(*)::int
      from pg_class c join pg_namespace n on n.oid = c.relnamespace,
           unnest(array['SELECT', 'INSERT', 'UPDATE', 'DELETE']) as p(priv)
-    where n.nspname = 'app' and c.relkind = 'r' and not has_table_privilege('app_server', c.oid, p.priv)),
-  0, 'app_server has DML on every app table');
+    where n.nspname = 'app' and c.relkind = 'r' and not has_table_privilege('app_server', c.oid, p.priv)
+      -- Phase 3 job-health tables are read-only or closed to the web tier (phase 3 §17.11);
+      -- supabase/tests/phase3_janitor.test.sql pins their exact privileges.
+      and c.relname not in ('job_heartbeats', 'storage_reconcile_runs')),
+  0, 'app_server has DML on every app table (except the Phase 3 job-health tables)');
 
 select is(
   (select count(*)::int from pg_proc p join pg_namespace n on n.oid = p.pronamespace
@@ -49,8 +52,9 @@ select is(
   0, 'no app function takes a client address: raw IPs never reach the database (review L5)');
 select ok(has_function_privilege('app_server', 'app.egress_ranges_overlapping(cidr)', 'EXECUTE'),
   'app_server can look up egress ranges by coarse prefix');
-select ok(has_function_privilege('app_server', 'app.claim_object_deletions(uuid, integer)', 'EXECUTE'),
-  'app_server can claim storage deletions');
+-- Phase 3 (owner decision D-1): the storage janitor is the only deletion executor.
+select ok(not has_function_privilege('app_server', 'app.claim_object_deletions(uuid, integer)', 'EXECUTE'),
+  'app_server can no longer claim storage deletions (D-1: the janitor is the one executor)');
 select ok(has_function_privilege('authenticated', 'app_realtime.can_access_topic(text)', 'EXECUTE'),
   'authenticated can call can_access_topic (Realtime policies)');
 select ok(not has_function_privilege('anon', 'app_realtime.can_access_topic(text)', 'EXECUTE'),
@@ -365,10 +369,9 @@ values
    'd7/2026/10/15/f0000000-0000-4000-8000-000000000007', 'old.bin', 'application/octet-stream',
    'application/octet-stream', 10, 'pending', now() + interval '2 hours', now() - interval '6 minutes');
 do $$ begin perform app.end_share('a0000000-0000-4000-8000-000000000006', 'deleted_by_creator'); end $$;
-set local role app_server;
+-- Run as the owner: since Phase 3 (D-1) app_server may not call claim_object_deletions.
 insert into cl select 'first', object_key, hold_until, tombstoned from app.claim_object_deletions('a0000000-0000-4000-8000-000000000006', 10);
 insert into cl select 'again', object_key, hold_until, tombstoned from app.claim_object_deletions('a0000000-0000-4000-8000-000000000006', 10);
-reset role;
 select is((select count(*)::int from cl where step = 'first'), 2, 'claims the share''s due deletions');
 select is(
   (select hold_until from cl where step = 'first' and object_key = 'd7/2026/10/15/f0000000-0000-4000-8000-000000000006'),
@@ -385,10 +388,8 @@ select ok(
 update app.object_deletions set locked_until = null, not_before = now() + interval '1 hour'
  where source_file_id = 'f0000000-0000-4000-8000-000000000006';
 update app.object_deletions set locked_until = null where source_file_id = 'f0000000-0000-4000-8000-000000000007';
-set local role app_server;
 insert into cl select 'other', object_key, hold_until, tombstoned from app.claim_object_deletions('a0000000-0000-4000-8000-000000000002', 10);
 insert into cl select 'later', object_key, hold_until, tombstoned from app.claim_object_deletions('a0000000-0000-4000-8000-000000000006', 10);
-reset role;
 select is((select array_agg(object_key) from cl where step = 'other'), array['d7/2026/10/15/f0000000-0000-4000-8000-000000000002'],
   'a share filter claims only that share''s deletions');
 select is((select array_agg(object_key) from cl where step = 'later'), array['d7/2026/10/15/f0000000-0000-4000-8000-000000000007'],

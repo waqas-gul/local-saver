@@ -45,7 +45,8 @@ export const observeResponse = z.object({
 export type ObserveResponse = z.infer<typeof observeResponse>;
 
 // ---------------------------------------------------------------------------- shares
-export const SHARE_STATUSES = ["pending_upload", "active"] as const;
+/** claimed: a burn-after-download share someone has opened, inside its grace window (Phase 3). */
+export const SHARE_STATUSES = ["pending_upload", "active", "claimed"] as const;
 export const FILE_STATUSES = ["pending", "verified", "rejected", "deleted"] as const;
 /** network: everyone on the network sees it. link_only: only through its links (DEC-033). */
 export const SHARE_SCOPES = ["network", "link_only"] as const;
@@ -59,8 +60,29 @@ export const fileDto = z.object({
   status: z.enum(FILE_STATUSES),
   previewable: z.boolean(),
   riskFlags: z.array(z.string()),
+  /** Burn after download, for the claimant only: download URLs left for this file (of 3). */
+  downloadsLeft: z.number().int().min(0).optional(),
 });
 export type FileDto = z.infer<typeof fileDto>;
+
+/**
+ * Burn after download (Phase 3, DEC-015): present only on burn shares, so every other share keeps
+ * the Phase 1–2 shape. The first person to download (or reveal) it claims it; then it is gone for
+ * everyone else, and deleted for good when the claimant's window ends.
+ */
+export const burnStateDto = z.object({
+  /** Someone has opened it. */
+  claimed: z.boolean(),
+  /** This device (or, for a link viewer, this browser) is the one who has it. */
+  byYou: z.boolean(),
+  /** When it is deleted for good: the claimant's window (shown to the claimant and the creator). */
+  availableUntil: z.iso.datetime({ offset: true }).nullable(),
+  /** The text is withheld until Reveal (everyone but the creator). */
+  textHidden: z.boolean(),
+  /** For the claimant of a text: reveals left (of 3). */
+  revealsLeft: z.number().int().min(0).nullable(),
+});
+export type BurnStateDto = z.infer<typeof burnStateDto>;
 
 export const shareDto = z.object({
   id: z.uuid(),
@@ -76,6 +98,7 @@ export const shareDto = z.object({
   files: z.array(fileDto),
   fileCount: z.number().int().min(0),
   totalBytes: z.number().int().min(0),
+  burn: burnStateDto.optional(),
 });
 export type ShareDto = z.infer<typeof shareDto>;
 
@@ -92,12 +115,15 @@ export type LocalFeedResponse = z.infer<typeof localFeedResponse>;
 /** This network, or Link only: never visible on any network, only through its links (DEC-033). */
 const destination = z.enum(SHARE_SCOPES);
 const expiresIn = z.number().int().positive().optional();
+/** Entitlement-gated (features.burnAfterDownload, Q-008). */
+const burnAfterDownload = z.boolean().optional();
 
 export const createTextBody = z
   .object({
     destination,
     content: z.string().refine((value) => value.trim().length > 0, "content must not be empty"),
     expiresIn,
+    burnAfterDownload,
   })
   .strict();
 
@@ -112,6 +138,7 @@ export const createFileShareBody = z
   .object({
     destination,
     expiresIn,
+    burnAfterDownload,
     files: z
       .array(
         z
@@ -144,13 +171,43 @@ export const createFileShareResponse = z.object({ share: shareDto, uploads: z.ar
 
 export const emptyBody = z.object({}).strict();
 
+/**
+ * Download URLs. For a burn share the first one claims it, so the client must say it means it:
+ * without confirm the server answers 409 CONFIRMATION_REQUIRED and nothing changes (phase 3 §17.8.8).
+ */
+export const downloadUrlBody = z.object({ confirm: z.literal(true).optional() }).strict();
+
+/** Reveal a burn text: always a deliberate action (03 §5.4). Without confirm: 409, nothing changes. */
+export const revealBody = z.object({ confirm: z.literal(true).optional() }).strict();
+
+const burnIssuance = z.object({
+  availableUntil: z.iso.datetime({ offset: true }),
+  /** Download URLs (or reveals) left for the claimant, of 3. */
+  left: z.number().int().min(0),
+});
+
 export const downloadUrlResponse = z.object({
   url: z.url(),
   expiresAt: z.iso.datetime({ offset: true }),
   fileName: z.string(),
   sizeBytes: z.number().int().min(0),
   riskFlags: z.array(z.string()),
+  /** Present when the download claimed (or retried) a burn share. */
+  burn: burnIssuance.optional(),
 });
+
+export const revealResponse = z.object({
+  text: z.object({ content: z.string() }),
+  burn: burnIssuance,
+});
+export type RevealResponse = z.infer<typeof revealResponse>;
+
+/** What this device may use (07 §2.2); resolved on the server, the UI only hides what it can't use. */
+export const entitlementsResponse = z.object({
+  plan: z.literal("free"),
+  features: z.object({ burnAfterDownload: z.boolean() }),
+});
+export type EntitlementsResponse = z.infer<typeof entitlementsResponse>;
 
 export const previewUrlResponse = z.object({
   url: z.url(),
@@ -222,6 +279,8 @@ export const viewerFileDto = z.object({
   previewable: z.boolean(),
   /** Archives carry a warning (blocked kinds never reach a Free link). */
   riskFlags: z.array(z.string()),
+  /** Burn after download, for the claimant only: download URLs left for this file (of 3). */
+  downloadsLeft: z.number().int().min(0).optional(),
 });
 export type ViewerFileDto = z.infer<typeof viewerFileDto>;
 
@@ -234,6 +293,7 @@ export const viewerContentResponse = z.object({
     expiresAt: isoDate,
     text: z.object({ content: z.string() }).nullable(),
     files: z.array(viewerFileDto),
+    burn: burnStateDto.optional(),
   }),
 });
 export type ViewerContent = z.infer<typeof viewerContentResponse>;

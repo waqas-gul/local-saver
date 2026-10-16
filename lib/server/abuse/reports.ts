@@ -58,7 +58,8 @@ async function resolveTarget(request: Request, env: Env, body: Body): Promise<Ta
   const caller = await requireCaller(request, env);
   const network = await currentNetwork(request, env);
   const share = await findVisibleShare(caller, network, body.target.shareId);
-  if (!share || share.status !== "active") throw notFound();
+  // A claimed burn share can still be reported by those who can see it (its claimant, its creator).
+  if (!share || (share.status !== "active" && share.status !== "claimed")) throw notFound();
   return {
     shareId: share.id,
     linkId: null,

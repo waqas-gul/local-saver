@@ -15,16 +15,16 @@ import { headObject, readObjectHead } from "../storage/s3";
 import { uploadHeaders } from "./create";
 import { SNIFF_BYTES, sniff } from "../storage/sniff";
 import { loadShareDto } from "./dto";
-import { executePendingDeletions } from "./end";
 import { isUuid, requireOwnShare } from "./read";
 
 /**
  * Upload completion (04 §8.5, 03 §7.3): HeadObject must show exactly the declared size,
  * then the first 4,100 bytes are sniffed. Anything else rejects the file, queues the object
- * for deletion, releases the reservation and fails the share (all-or-nothing, DV1-10).
+ * for deletion, releases the reservation and fails the share (all-or-nothing, DV1-10). The
+ * storage janitor deletes the queued objects (phase 3, D-1).
  */
 
-async function rejectUpload(env: Env, shareId: string, fileId: string, reason: string): Promise<never> {
+async function rejectUpload(shareId: string, fileId: string, reason: string): Promise<never> {
   await getDb().transaction().execute(async (trx) => {
     // Lock order everywhere: share, then file, then the storage ledger (no deadlocks with end_share).
     await trx.selectFrom("app.shares").select("id").where("id", "=", shareId).forUpdate().execute();
@@ -44,7 +44,6 @@ async function rejectUpload(env: Env, shareId: string, fileId: string, reason: s
     `.execute(trx);
     await sql`select app.end_share(${shareId}::uuid, 'upload_failed')`.execute(trx);
   });
-  await executePendingDeletions(env, shareId);
   throw new ApiError(422, "UPLOAD_REJECTED", "The upload was rejected", { reason });
 }
 
@@ -67,7 +66,7 @@ export async function completeFile(
   if (!file) throw notFound();
   await enforceRateLimit("completeUpload", caller.principal.userId);
 
-  if (file.upload_status === "verified") return loadShareDto(db, share.id, caller.principal.userId);
+  if (file.upload_status === "verified") return loadShareDto(db, share.id, caller.principal.userId, caller.device.id);
   if (file.upload_status !== "pending" || share.status !== "pending_upload") {
     throw new ApiError(422, "UPLOAD_REJECTED", "The upload was rejected", { reason: file.rejection_reason ?? "share_ended" });
   }
@@ -76,7 +75,7 @@ export async function completeFile(
   const stored = await headObject(env, file.object_key);
   if (stored === null) throw new ApiError(409, "UPLOAD_INCOMPLETE", "The file has not been uploaded yet");
   const size = stored.size;
-  if (size !== declared) await rejectUpload(env, share.id, file.id, "size_mismatch");
+  if (size !== declared) await rejectUpload(share.id, file.id, "size_mismatch");
   // Storage keeps headers the signature didn't cover (for example Content-Encoding: gzip,
   // which browsers would undo on download). Only the signed set is acceptable.
   const expected = uploadHeaders(file.original_name, file.stored_content_type);
@@ -86,7 +85,7 @@ export async function completeFile(
     stored.cacheControl !== expected["cache-control"] ||
     (stored.contentEncoding !== null && stored.contentEncoding !== "")
   ) {
-    await rejectUpload(env, share.id, file.id, "metadata_mismatch");
+    await rejectUpload(share.id, file.id, "metadata_mismatch");
   }
 
   const sniffed = sniff(await readObjectHead(env, file.object_key, SNIFF_BYTES));
@@ -94,10 +93,11 @@ export async function completeFile(
   // A link-only share must stay shareable by link: content that a link may not carry (an
   // executable under a harmless name, for example) fails the upload (T-035).
   if (share.scope === "link_only" && !remoteFilePolicy(flags, share.entitlementSnapshot as Partial<Entitlements>).allowed) {
-    await rejectUpload(env, share.id, file.id, "remote_file_blocked");
+    await rejectUpload(share.id, file.id, "remote_file_blocked");
   }
-  // Previews only when the stored type is a raster image and the bytes really are one (03 §6).
-  const previewable = sniffed.rasterImage && isPreviewType(file.stored_content_type);
+  // Previews only when the stored type is a raster image and the bytes really are one (03 §6);
+  // never for burn-after-download shares (phase 3 §17.8.8).
+  const previewable = !share.burnAfterDownload && sniffed.rasterImage && isPreviewType(file.stored_content_type);
 
   await db.transaction().execute(async (trx) => {
     // Lock order everywhere: share, then file, then the storage ledger (no deadlocks with end_share).
@@ -163,5 +163,5 @@ export async function completeFile(
     }
   });
 
-  return loadShareDto(db, share.id, caller.principal.userId);
+  return loadShareDto(db, share.id, caller.principal.userId, caller.device.id);
 }

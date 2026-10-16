@@ -1,17 +1,21 @@
 #!/usr/bin/env node
 /**
- * Load the shared-egress lists into app.network_egress_ranges (03 §3.5 (a); phase 1 manual
- * procedure, scheduled from Phase 3): Apple iCloud Private Relay egress ranges and the Tor
- * exit list. Addresses in these lists make a network `shared_egress` (local sharing off).
+ * Load the shared-egress lists into app.network_egress_ranges (03 §3.5 (a)): Apple iCloud Private
+ * Relay egress ranges and the Tor exit list. Addresses in these lists make a network
+ * `shared_egress` (local sharing off).
  *
- *   LOADER_DATABASE_URL=postgres://… node scripts/load-egress-ranges.cjs
+ *   LOADER_DATABASE_URL=postgres://app_egress_loader:…@… node scripts/load-egress-ranges.cjs
  *   LOADER_DATABASE_URL=… node scripts/load-egress-ranges.cjs --apple apple.csv --tor tor.txt
  *
  * Without --apple/--tor the lists are downloaded. Adjacent and overlapping ranges are merged
  * first (285,000 Apple rows become about 14,000), so the app's coarse-prefix lookup gets a few
- * rows back (review L5). Each source is replaced in one transaction, and
- * app.runtime_flags('egress_ranges') records when, so staging and production can fail closed
- * when the lists go stale (lib/server/network/egress.ts).
+ * rows back (review L5). Both sources are replaced in one transaction through
+ * app.replace_egress_ranges, which also records the load in app.runtime_flags('egress_ranges'), so
+ * staging and production can fail closed when the lists go stale (lib/server/network/egress.ts).
+ *
+ * Phase 3 (D-4): scheduled daily by .github/workflows/refresh-egress-ranges.yml, connecting as the
+ * least-privilege app_egress_loader role, which may only run that function. It runs outside an
+ * Edge Function because the merge needs about 4 s of CPU, twice the Edge limit (P3-00).
  */
 const { readFileSync } = require("node:fs");
 const ipaddr = require("ipaddr.js");
@@ -117,19 +121,8 @@ async function main() {
   try {
     await client.query("begin");
     for (const [source, { cidrs }] of Object.entries(lists)) {
-      await client.query("delete from app.network_egress_ranges where source = $1", [source]);
-      for (let i = 0; i < cidrs.length; i += 5000) {
-        await client.query(
-          "insert into app.network_egress_ranges (cidr, source) select unnest($1::cidr[]), $2 on conflict do nothing",
-          [cidrs.slice(i, i + 5000), source],
-        );
-      }
+      await client.query("select app.replace_egress_ranges($1, $2::cidr[])", [source, cidrs]);
     }
-    const rows = Object.fromEntries(Object.entries(lists).map(([s, l]) => [s, l.cidrs.length]));
-    await client.query(
-      "update app.runtime_flags set value = $1::jsonb, updated_at = now(), updated_by = 'load-egress-ranges' where key = 'egress_ranges'",
-      [JSON.stringify({ loadedAt: new Date().toISOString(), rows })],
-    );
     await client.query("commit");
     for (const [source, list] of Object.entries(lists)) {
       console.log(`${source}: ${list.listed} ranges listed, ${list.cidrs.length} rows after merging, ${list.skipped} lines skipped`);

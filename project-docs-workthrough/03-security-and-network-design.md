@@ -311,7 +311,7 @@ Link fields: `expires_at` (≤ share expiry and ≤ plan maximum), `revoked_at`,
 
 1. Rate-limit by `linkId`, network key and link session.
 2. Load the link. Compute the HMAC of the supplied secret **even if the link doesn't exist**, then compare timing-safely. A missing link or wrong secret returns a generic **404 `LINK_UNAVAILABLE`**.
-3. **Only after the secret is proven**, reveal state: revoked, expired or consumed returns **410 `LINK_EXPIRED`**.
+3. **Only after the secret is proven**, reveal state: revoked or expired returns **410 `LINK_EXPIRED`**. A burn share that someone else claimed, or that is consumed, returns **410 `ALREADY_DOWNLOADED`** with `byYou` (Phase 3, DV3-6). Its claimant's own session unlocks again during grace.
 4. Verify the password if one is set (Phase 4, §4.7).
 5. Create or refresh the viewer session:
    - Cookie `__Host-link_session`: 256-bit random, httpOnly, Secure, SameSite=Lax, Path=/. It is stored hashed in `app.link_sessions`.
@@ -466,7 +466,21 @@ returning id, claim_grace_until;
 | POST only | Claims happen only through `POST` with a JSON body and an Origin check. Bots issuing GETs cannot consume. The share page asks for confirmation: *"This will be deleted after you open it."* |
 | Multi-file | One claim covers the whole share. The claimant gets URLs for each file during grace. |
 | Network and room behaviour | Once claimed, the share disappears for everyone else on the network (or in the room) via `share.changed`. On a busy network the first device to open it wins; the composer says so. |
-| Plan | Pro feature per the plan list. Q-008 asks whether Free should get it. |
+| Plan | Pro feature per the plan list. **Q-008 answered (owner, 2026-10-16):** Pro at paid launch; Free only while the runtime flag `free_burn_after_download` is on (beta and testing; default off). |
+
+### As built in Phase 3 (2026-10-16)
+
+[Phase 3 §18](phases/phase-3-expiry-one-time-download.md#18-implementation-2026-10-16) records the details. Differences from §5.3–§5.4, and what was added:
+
+- **Claimant column.** The link-session claimant is `claimed_link_session_hash`: link sessions are keyed by the SHA-256 of their cookie (C-8). The link used is `claimed_link_id`, without a foreign key (DV3-2).
+- **Grace.** It is capped at `expires_at` as well as 6 h (D-6). Every check uses the database clock.
+- **READ COMMITTED.** `app.claim_burn_share` refuses REPEATABLE READ and SERIALIZABLE (`25001`): under them a losing claimant would fail with `40001` instead of losing cleanly.
+- **Confirmation.** A claim needs `{ "confirm": true }` in the POST body. Without it the answer is `409 CONFIRMATION_REQUIRED` and nothing changes, so a client unaware of burn can't claim by accident.
+- **Text.** It is withheld from every DTO except the creator's. `POST …/reveal` is the claim and returns it, up to 3 times.
+- **Creator (D-7).** The verified creator may download until the share is consumed. A creator who opens their own link in a browser is a link viewer and claims it (RISK-039).
+- **Consumption.** It happens through `end_share('consumed')`. Objects are deleted 5 minutes later by the storage janitor.
+- **Retries and limits.** The claimant gets 3 URLs per file (`409 BURN_RETRY_LIMIT` after that). Anyone else who could see the share gets `410 ALREADY_DOWNLOADED`, and everyone else `404`.
+- **Tested.** 50 simultaneous claims give exactly one winner, at the SQL level (50 connections) and the API level (50 devices; 25 devices + 25 viewers), with a mutation check.
 
 ### 5.5 Residual risks
 
@@ -692,14 +706,15 @@ Notes:
 
 | Secret | Used by | Storage | Rotation | Blast radius if leaked |
 |---|---|---|---|---|
-| `SUPABASE_SECRET_KEY` | **Nothing yet.** The server validates it when set (`lib/server/env.ts`), but no code uses it. Planned for server admin operations and the Phase 3 storage janitor (not built). | Host env (and Edge Function secrets once the janitor exists) | 90 days / on incident | Full data access (bypasses RLS) |
+| `SUPABASE_SECRET_KEY` | **Nothing.** The server validates it when set (`lib/server/env.ts`), but no code uses it. The Phase 3 storage janitor does **not** use it either: it connects as the least-privilege `app_janitor` role (C-4). Supabase still injects it, the service-role key and `SUPABASE_DB_URL` (user `postgres`) into every Edge Function, and the runtime can't remove them (security review, RISK-036). | Host env | 90 days / on incident | Full data access (bypasses RLS) |
 | `DATABASE_URL` (least-privilege app role) | Server | Host env | 90 days | Application data |
-| R2 access keys: **web** token (object read/write, one bucket), **janitor** token (separate) | Server; janitor | Env | 90 days | Bucket objects |
+| R2 access keys: **web** token (object read/write, one bucket), **janitor** token (separate) | Server; janitor (since Phase 3: `JANITOR_S3_ACCESS_KEY_ID`, `JANITOR_S3_SECRET_ACCESS_KEY` as function secrets) | Env; function secrets | 90 days | Bucket objects. The janitor token can read and overwrite every object (no delete-only scope, RISK-037). |
+| Database role passwords (Phase 3): `app_janitor`, `app_egress_loader` | The janitor (`JANITOR_DATABASE_URL`); the egress workflow (`EGRESS_LOADER_DATABASE_URL`) | Function secrets; GitHub environment secrets | 90 days / on incident | Only the functions each role may run: no table access |
 | `NETWORK_KEY_SECRET` (current + previous) | Server | Env | Yearly or on incident, with a 100-day overlap (§3.2) | De-anonymization of network keys (IPv4 keys can be brute-forced with the secret). It does **not** by itself grant access to local content, which also needs a request from that network. |
 | `LINK_PEPPER`, `CODE_PEPPER`, `INVITE_PEPPER` (versioned) | Server: `LINK_PEPPER` and `CODE_PEPPER` since Phase 2 (link secrets, short codes; ≥ 32 characters, different from each other, required when deployed); `INVITE_PEPPER` from Phase 4 | Env (`PEPPER_VERSION`, `*_PREVIOUS` during a rotation) | Rarely (version column allows it) | Offline verification of leaked hashes |
 | `ORIGIN_SHARED_SECRET` (2 accepted during rotation) | Cloudflare Transform Rule and `proxy.ts` | Cloudflare and env | 90 days | Origin-lock bypass → IP spoofing |
 | Turnstile secret key | Supabase Auth, which verifies the Turnstile token at anonymous sign-in; **since Phase 2 also the server** (`TURNSTILE_SECRET_KEY`: code-guessing escalation and reports, required when deployed, DV2-6) | The Supabase project's Auth captcha settings and the host env | Yearly / incident | Bot protection bypass |
-| `JANITOR_TRIGGER_SECRET` | pg_cron (Vault) → Edge Function | Supabase Vault and function secrets | 90 days | Janitor triggering (it only deletes outbox entries) |
+| `JANITOR_TRIGGER_SECRET` (Phase 3; `_PREVIOUS` during rotation) | pg_cron (Vault `storage_janitor_secret`) → the `storage-janitor` Edge Function | Supabase Vault and function secrets | 90 days | Starting a janitor run, which still obeys its guard rails |
 | Billing API key / webhook secret (Phase 4) | Server | Env | Per provider guidance | Billing tampering |
 | `NEXT_SERVER_ACTIONS_ENCRYPTION_KEY` (only if multi-instance) | Next.js | Env | On deploy policy | Action closure decryption |
 
@@ -709,7 +724,7 @@ Rules:
 - Validate all environment variables at boot with zod. The process must not start with missing or placeholder secrets.
 - Separate values per environment. Least-privilege tokens.
 - Secret scanning in CI and GitHub push protection.
-- Incident rotation runbook (Phase 6).
+- Incident rotation runbook: written in Phase 3 ([secret rotation](runbooks/secret-rotation.md)), as the public beta gate needs it (C-13).
 
 ---
 
@@ -722,18 +737,19 @@ Rules:
 | Network presence | 10 min "present"; rows deleted 24 h after last seen | Needed for realtime authorization and the large-network cap |
 | Dual-stack bindings, probe nonces, IPv4↔IPv6 links | 10 min · 60 s · 7 days | CGNAT detection |
 | IP-derived HMACs in logs/audit | ≤ 7 days (security logs) | Rate-limit keys expire with their windows |
-| File bytes | Deleted when a share is deleted or a file rejected (tombstone first while an upload URL may be live, deleted ≤ 20 min later). After expiry: at the next storage sweep (Phase 1) or by the janitor (Phase 3). Backstop: lifecycle rule per class, 8 / 31 / 91 days | — |
+| File bytes | Since Phase 3, deleted by the storage janitor within about a minute of a share ending, whatever the reason: expiry, deletion, rejection, consumption (+5 minutes). Tombstoned first while an upload URL may be live (deleted ≤ 20 min later). **Takedowns are held** until an operator releases them (D-2). Backstop: lifecycle rule per class, 8 / 31 / 91 days, which also applies to held objects. | — |
 | Text content | **Nulled** in the same transaction that ends the share | — |
-| Share/file metadata tombstones | Free: 30 days after end (abuse handling). Pro/Team: per history retention (Q-015). | — |
-| Download log | Free: 30 days. Pro/Team: per plan. | — |
-| Audit events | Security events ≥ 90 days. Team: per workspace policy. | — |
-| Anonymous users | Deleted after 30 days of inactivity | Cascades devices and presence |
+| Share/file metadata tombstones | Free: 30 days after end (abuse handling). Pro/Team: per history retention (Q-015). Purged daily since Phase 3, **except shares with abuse reports** (D-3) and shares whose deletions are still open or held. Burn claims (claimant user and device IDs, or the link-session hash) stay with the share until then. | — |
+| Download log | Free: 30 days (purged since Phase 3, except for reported shares). Pro/Team: per plan. Since Phase 3 it includes the burn events `burn_claimed`, `burn_retry` and `text_revealed` (no content). | — |
+| Audit events | Security events ≥ 90 days (purged since Phase 3, except `admin.*`, `report.*` and events about reported shares or links, D-3). Team: per workspace policy. | — |
+| Anonymous users | Deleted after 30 days of inactivity with nothing open (Phase 3), **never while suspended** (D-9) | Cascades devices, presence, flags, idempotency keys and Auth sessions (with their stored IPs) |
+| Job heartbeats, reconcile runs (Phase 3) | Overwritten per job; runs kept | Counts and short error codes only: no keys, names or secrets |
 | Realtime messages | Supabase keeps broadcast-from-DB messages ≥ 72 h and ≤ 4 days | Hence ID-only payloads |
 | Link viewer sessions (Phase 2) | Cookie 12 h from the last unlock or code; the stored SHA-256 is deleted 24 h after expiry by `purge-ephemeral` | No viewer identity, network key or IP is stored with a session (DV2-10) |
 | Link grants (Phase 2) | ≤ 12 h; deleted after expiry by `purge-ephemeral` | — |
-| Link and code hashes (Phase 2) | Link rows stay with their share until the Phase 3 tombstone purge; code HMACs are cleared once the code expires | Secrets and codes are never stored in clear |
+| Link and code hashes (Phase 2) | Link rows stay with their share until the tombstone purge (Phase 3); code HMACs are cleared once the code expires | Secrets and codes are never stored in clear |
 | Downloads by link viewers (Phase 2) | As the download log (30 days, purge in Phase 3), with the link ID and browser family only | — |
-| Abuse reports and evidence | Per legal advice. As built (Phase 2): category, details, optional email, reporter kind, the reporting anonymous user for devices; kept until reviewed, no retention job (Q-022). No evidence preservation (RISK-031). | — |
+| Abuse reports and evidence | Per legal advice. As built (Phase 2): category, details, optional email, reporter kind, the reporting anonymous user for devices; kept until reviewed, no retention job (Q-022). Phase 3: takedown objects are held and copied to `hold/`, out of the lifecycle rules' reach, until an operator releases them. Reported shares and their records are kept (D-2, D-3). How long is a legal decision (RISK-031). | — |
 | Rate counters keyed by network key (Phase 2) | Until their window ends; a code block 24 h | Keyed hashes, not addresses |
 
 GDPR and similar laws: hashed identifiers are still personal data. Before public launch you need:

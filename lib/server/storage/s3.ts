@@ -1,6 +1,5 @@
 import "server-only";
 import {
-  DeleteObjectCommand,
   GetObjectCommand,
   HeadObjectCommand,
   PutObjectCommand,
@@ -13,7 +12,8 @@ import { isValidObjectKey } from "./keys";
 
 /**
  * Cloudflare R2 over the S3 API (DEC-009). Locally and in CI the same code talks to RustFS
- * (DV1-4). Presigning is a local SigV4 computation; HEAD, ranged GET and DELETE are real calls.
+ * (DV1-4). Presigning is a local SigV4 computation; HEAD and ranged GET are real calls. The web
+ * tier never deletes or overwrites objects: the storage janitor does (phase 3, D-1).
  */
 
 export const UPLOAD_URL_TTL_SECONDS = 15 * 60;
@@ -134,31 +134,4 @@ export async function readObjectHead(env: Env, key: string, bytes: number): Prom
     new GetObjectCommand({ Bucket: config.bucket, Key: key, Range: `bytes=0-${Math.max(0, bytes - 1)}` }),
   );
   return object.Body ? await object.Body.transformToByteArray() : new Uint8Array();
-}
-
-/**
- * Replace an object's content with an empty tombstone (unconditional write). Used instead of a
- * delete while an upload URL may still be live: the key stays taken, so the write-once URL
- * (If-None-Match: *) can't put bytes back (review M1).
- */
-export async function putTombstone(env: Env, key: string): Promise<void> {
-  assertKey(key);
-  const { s3, config } = storage(env);
-  await s3.send(
-    new PutObjectCommand({
-      Bucket: config.bucket,
-      Key: key,
-      Body: new Uint8Array(0),
-      ContentType: "application/octet-stream",
-      CacheControl: "no-store",
-      Metadata: { tombstone: "1" },
-    }),
-  );
-}
-
-/** Idempotent: deleting a missing key succeeds. */
-export async function deleteObject(env: Env, key: string): Promise<void> {
-  assertKey(key);
-  const { s3, config } = storage(env);
-  await s3.send(new DeleteObjectCommand({ Bucket: config.bucket, Key: key }));
 }

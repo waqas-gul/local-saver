@@ -39,6 +39,10 @@ export const LIMITS = {
   // Abuse reports, per network key and per reporter (device or link session).
   reportNetwork: { limit: 10, window: "1 hour" },
   reportReporter: { limit: 10, window: "1 hour" },
+
+  // Phase 3: burn after download (phase 3 §17.12). Reveals count against downloadUrl / viewerUrl.
+  confirmReceived: { limit: 30, window: "1 minute" },
+  entitlements: { limit: 60, window: "1 minute" },
 } as const satisfies Record<string, Limit>;
 
 export type LimitName = keyof typeof LIMITS;

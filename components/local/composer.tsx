@@ -1,6 +1,6 @@
 "use client";
 
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { FileUp, Send, X } from "lucide-react";
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
@@ -9,6 +9,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { ApiRequestError } from "@/lib/client/api-error";
+import { entitlementsQuery } from "@/lib/client/queries/entitlements";
 import { queryKeys } from "@/lib/client/queries/keys";
 import { useRuntime } from "@/lib/client/runtime";
 import { UploadsStore } from "@/lib/client/stores/session";
@@ -16,6 +17,7 @@ import { useUiStore } from "@/lib/client/stores/ui-store";
 import { uploadFiles } from "@/lib/client/uploader";
 import { shareResponse, type ShareDto } from "@/lib/shared/api/schemas";
 import { EXPIRY_LABELS, FREE_LIMITS } from "@/lib/shared/plans";
+import { BURN } from "../burn/copy";
 import { LINK_ONLY_AUDIENCE } from "../share/copy";
 import { ShareLinkDialog } from "../share/share-link-dialog";
 import { AUDIENCE } from "./copy";
@@ -25,7 +27,8 @@ import { formatBytes } from "./format";
  * Post text or files (DEC-033) to this network, or as Link only: never visible on any network,
  * shared by link, QR code or code (Phase 2). The audience line is shown right below the button.
  * Where local sharing is off, Link only is the one destination. Limits shown here are hints;
- * the server enforces them (07 §3).
+ * the server enforces them (07 §3). Burn after download (Phase 3) is offered only when the server
+ * says this device may use it (GET /me/entitlements, Q-008).
  */
 
 type Destination = "network" | "link_only";
@@ -37,6 +40,8 @@ function textError(error: unknown): string {
     if (error.code === "RATE_LIMITED") return "You're posting too fast. Wait a moment.";
     if (error.code === "UPLOADS_DISABLED") return "Posting is paused right now.";
     if (error.code === "REMOTE_LINKS_DISABLED") return "Sharing by link is paused right now.";
+    // OWNER REVIEW (phase 3 §17.9): burn errors at posting.
+    if (error.code === "FEATURE_NOT_IN_PLAN" || error.code === "BURN_AFTER_DOWNLOAD_DISABLED") return "Burn after download isn't available right now.";
   }
   return "Couldn't post. Try again.";
 }
@@ -57,6 +62,10 @@ export function Composer({ localAvailable = true }: { localAvailable?: boolean }
   // The just-posted link-only share, to make its link straight away.
   const [linkShare, setLinkShare] = useState<ShareDto | null>(null);
   const destination: Destination = localAvailable ? chosen : "link_only";
+  const entitlements = useQuery(entitlementsQuery(runtime?.api ?? null));
+  const burnAllowed = entitlements.data?.features.burnAfterDownload === true;
+  const [burnChosen, setBurnChosen] = useState(false);
+  const burn = burnAllowed && burnChosen;
 
   const textBytes = new TextEncoder().encode(draft).length;
   const tooLong = textBytes > FREE_LIMITS.maxTextBytes;
@@ -74,7 +83,7 @@ export function Composer({ localAvailable = true }: { localAvailable?: boolean }
     setError(null);
     try {
       const { share } = await runtime.api.request("POST", "/api/v1/texts", {
-        body: { destination, content: draft, expiresIn },
+        body: { destination, content: draft, expiresIn, ...(burn ? { burnAfterDownload: true } : {}) },
         schema: shareResponse,
       });
       setDraft("");
@@ -93,7 +102,15 @@ export function Composer({ localAvailable = true }: { localAvailable?: boolean }
     const target = destination;
     setFiles([]);
     setError(null);
-    const share = await uploadFiles({ api: runtime.api, files: selected, expiresIn, destination: target, uploads, onFinished: refresh });
+    const share = await uploadFiles({
+      api: runtime.api,
+      files: selected,
+      expiresIn,
+      destination: target,
+      burnAfterDownload: burn,
+      uploads,
+      onFinished: refresh,
+    });
     if (share && target === "link_only") setLinkShare(share);
   };
 
@@ -183,9 +200,26 @@ export function Composer({ localAvailable = true }: { localAvailable?: boolean }
             {destination === "network" ? "Share to this network" : "Post and get a link"}
           </Button>
         </div>
+        {burnAllowed && (
+          <label className="flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              className="size-4"
+              checked={burnChosen}
+              onChange={(e) => setBurnChosen(e.target.checked)}
+              data-testid="composer-burn"
+            />
+            {BURN.toggle}
+          </label>
+        )}
         <p className="text-xs text-muted-foreground" data-testid="audience-line">
           {destination === "network" ? AUDIENCE : LINK_ONLY_AUDIENCE}
         </p>
+        {burn && (
+          <p className="text-xs text-muted-foreground" data-testid="burn-line">
+            {destination === "network" ? BURN.networkLine : BURN.linkOnlyLine}
+          </p>
+        )}
         {error && <p className="text-sm text-destructive">{error}</p>}
       </CardContent>
       {linkShare && <ShareLinkDialog share={linkShare} open onOpenChange={(open) => !open && setLinkShare(null)} />}

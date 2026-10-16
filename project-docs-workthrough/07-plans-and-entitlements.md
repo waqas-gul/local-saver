@@ -31,7 +31,7 @@ Values in *italics* are proposals that need owner confirmation.
 | Download-URL issuances per link per day | *500* | *10,000* | *10,000* |
 | Executables/scripts in remote links | Blocked until scanning exists (Q-010) | Allowed, with a warning | Per policy |
 | Password-protected links | ❌ | ✅ | ✅ (can be required by policy) |
-| One-time download (burn) | ❌ (Q-008) | ✅ | ✅ |
+| One-time download (burn) | ❌ at paid launch; during beta and testing only while the runtime flag `free_burn_after_download` is on (Q-008, owner 2026-10-16; default off) | ✅ | ✅ |
 | Private rooms | ❌ | ✅ | ✅ (workspace rooms) |
 | Custom room names | ❌ | ✅ | ✅ |
 | Read-only room links | ❌ | ✅ (Q-009) | ✅ (policy) |
@@ -138,7 +138,7 @@ Rule: **the UI only hints. The service layer enforces. The database and storage 
 | **Storage quota** | Usage meter | `app.reserve_storage(subject, bytes, activeStorageBytes)` at init. Commit or release later. | Non-negative ledger. Atomic conditional UPDATE. Daily reconciliation. | — |
 | **Daily upload volume** | — | `rate_counters` keys `upload_bytes:user:{id}:{day}` and `upload_bytes:net:{networkKey}:{day}` | Atomic upsert | Cloudflare rate-limit rule |
 | **Files per share / text size** | Picker and editor limits | `maxFilesPerShare`, `maxTextBytes` | `content_bytes <= 1048576` hard cap | — |
-| **Burn after download** | Toggle hidden or disabled | `features.burnAfterDownload` at share creation | `status <> 'claimed' OR burn_after_download` | — |
+| **Burn after download** | Toggle hidden or disabled. As built: shown only when `GET /me/entitlements` says `burnAfterDownload`. | `features.burnAfterDownload` at share creation. As built (Phase 3): or the Free plan while `free_burn_after_download` is on. `403 FEATURE_NOT_IN_PLAN` (`requiredPlan: "pro"`); kill switch `burn_after_download_enabled` → `503`. The snapshot records the grant; claims never re-check the plan. | `status <> 'claimed' OR burn_after_download`; Phase 3 claim checks (04 §7.1) | — |
 | **Passwords** | Option shown only when entitled | Link create/update require `features.linkPasswords`. Unlock **always** enforces an existing password, whatever the current plan. | `password_hash` written only by the service | — |
 | **Private rooms / custom names / room links / multi-use invites** | Options gated | Room create/update, link create and invite create check the features | `rooms.kind` checks. Rooms are never network-visible, and room links can't target a network feed. | — |
 | **Transfer history** | Navigation hidden for Free | History endpoints require `features.transferHistory`. Query window ≤ `historyRetentionDays`. | `retention_until` set at insert from the snapshot. Purge job. | — |

@@ -11,13 +11,15 @@ import { ApiError, notFound } from "../http/errors";
 import type { NetworkView } from "../network/current";
 import { postingTarget } from "../policy/posting";
 import { enforceRateLimit } from "../ratelimit/limits";
+import { burnSnapshot } from "./burn";
 import { loadShareDto } from "./dto";
 import { resolveExpiry } from "./expiry";
 import { requireOwnShare } from "./read";
 
 /**
  * Text shares (04 §4.5, DEC-027): posted to this network or link-only (DEC-033); versioned
- * last-writer-wins edits by the creator only (Q-021).
+ * last-writer-wins edits by the creator only (Q-021). A text may be burn-after-download
+ * (phase 3 §17.10): then only Reveal shows it, once claimed, and it can't be edited.
  */
 
 function assertTextSize(content: string, maxBytes: number): number {
@@ -40,6 +42,8 @@ export async function createText(
   const entitlements = resolveEntitlements(caller.principal);
   const bytes = assertTextSize(body.content, entitlements.limits.maxTextBytes);
   const expiry = resolveExpiry(entitlements, body.expiresIn);
+  const snapshot = await burnSnapshot(entitlements, env, body.burnAfterDownload);
+  const burn = body.burnAfterDownload === true;
   await enforceRateLimit("textWriteUser", caller.principal.userId);
   await enforceRateLimit("textWriteSpace", networkLimitKey);
 
@@ -57,7 +61,8 @@ export async function createText(
         status: "active",
         retention_class: expiry.retentionClass,
         expires_at: sql<Date>`now() + make_interval(secs => ${expiry.seconds})`,
-        entitlement_snapshot: JSON.stringify(entitlements),
+        burn_after_download: burn,
+        entitlement_snapshot: JSON.stringify(snapshot),
       })
       .returning("id")
       .executeTakeFirstOrThrow();
@@ -81,9 +86,9 @@ export async function createText(
       networkSpaceId: spaceId,
       targetType: "share",
       targetId: share.id,
-      metadata: { kind: "text", scope: body.destination },
+      metadata: { kind: "text", scope: body.destination, ...(burn ? { burn } : {}) },
     });
-    return loadShareDto(trx, share.id, caller.principal.userId);
+    return loadShareDto(trx, share.id, caller.principal.userId, caller.device.id);
   });
 }
 
@@ -94,7 +99,8 @@ export async function editText(
   body: z.infer<typeof editTextBody>,
 ): Promise<ShareDto> {
   const share = await requireOwnShare(caller, network, shareId);
-  if (share.kind !== "text" || share.status !== "active") throw notFound();
+  // A burn text is fixed once posted: someone may already be reading it.
+  if (share.kind !== "text" || share.status !== "active" || share.burnAfterDownload) throw notFound();
   const entitlements = resolveEntitlements(caller.principal);
   const bytes = assertTextSize(body.content, entitlements.limits.maxTextBytes);
   await enforceRateLimit("textWriteUser", caller.principal.userId);
@@ -122,5 +128,5 @@ export async function editText(
       currentVersion: current?.version ?? null,
     });
   }
-  return loadShareDto(db, share.id, caller.principal.userId);
+  return loadShareDto(db, share.id, caller.principal.userId, caller.device.id);
 }
