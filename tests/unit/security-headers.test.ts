@@ -116,8 +116,14 @@ describe("securityHeaders", () => {
     expect(h["X-Robots-Tag"]).toBe("noindex, nofollow");
   });
 
+  it.each(["/s/abc", "/c"])("never lets %s be cached (T-047)", (path) => {
+    expect(securityHeaders(path, { https: false })["Cache-Control"]).toBe("no-store");
+  });
+
   it("does not treat look-alike paths as share routes", () => {
     expect(securityHeaders("/settings", { https: false })["Referrer-Policy"]).toBe("strict-origin-when-cross-origin");
+    expect(securityHeaders("/sitemap", { https: false })["Cache-Control"]).toBeUndefined();
+    expect(securityHeaders("/code", { https: false })["Referrer-Policy"]).toBe("strict-origin-when-cross-origin");
   });
 
   it("marks API responses no-store and noindex, with a locked-down CSP", () => {

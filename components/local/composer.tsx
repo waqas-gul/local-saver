@@ -14,15 +14,21 @@ import { useRuntime } from "@/lib/client/runtime";
 import { UploadsStore } from "@/lib/client/stores/session";
 import { useUiStore } from "@/lib/client/stores/ui-store";
 import { uploadFiles } from "@/lib/client/uploader";
-import { shareResponse } from "@/lib/shared/api/schemas";
+import { shareResponse, type ShareDto } from "@/lib/shared/api/schemas";
 import { EXPIRY_LABELS, FREE_LIMITS } from "@/lib/shared/plans";
+import { LINK_ONLY_AUDIENCE } from "../share/copy";
+import { ShareLinkDialog } from "../share/share-link-dialog";
 import { AUDIENCE } from "./copy";
 import { formatBytes } from "./format";
 
 /**
- * Post text or files to this network (DEC-033). The audience line is shown right below the
- * button. Limits shown here are hints; the server enforces them (07 §3).
+ * Post text or files (DEC-033) to this network, or as Link only: never visible on any network,
+ * shared by link, QR code or code (Phase 2). The audience line is shown right below the button.
+ * Where local sharing is off, Link only is the one destination. Limits shown here are hints;
+ * the server enforces them (07 §3).
  */
+
+type Destination = "network" | "link_only";
 
 function textError(error: unknown): string {
   if (error instanceof ApiRequestError) {
@@ -30,11 +36,12 @@ function textError(error: unknown): string {
     if (error.code === "LOCAL_SHARING_UNAVAILABLE") return "Local sharing is off on this network.";
     if (error.code === "RATE_LIMITED") return "You're posting too fast. Wait a moment.";
     if (error.code === "UPLOADS_DISABLED") return "Posting is paused right now.";
+    if (error.code === "REMOTE_LINKS_DISABLED") return "Sharing by link is paused right now.";
   }
   return "Couldn't post. Try again.";
 }
 
-export function Composer() {
+export function Composer({ localAvailable = true }: { localAvailable?: boolean }) {
   const runtime = useRuntime();
   const queryClient = useQueryClient();
   const uploads = UploadsStore.useStoreApi();
@@ -44,8 +51,12 @@ export function Composer() {
   const setFiles = useUiStore((s) => s.setSelectedFiles);
   const [tab, setTab] = useState("text");
   const [expiresIn, setExpiresIn] = useState<number>(FREE_LIMITS.localDefaultExpirySeconds);
+  const [chosen, setChosen] = useState<Destination>("network");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The just-posted link-only share, to make its link straight away.
+  const [linkShare, setLinkShare] = useState<ShareDto | null>(null);
+  const destination: Destination = localAvailable ? chosen : "link_only";
 
   const textBytes = new TextEncoder().encode(draft).length;
   const tooLong = textBytes > FREE_LIMITS.maxTextBytes;
@@ -62,12 +73,13 @@ export function Composer() {
     setBusy(true);
     setError(null);
     try {
-      await runtime.api.request("POST", "/api/v1/texts", {
-        body: { destination: "network", content: draft, expiresIn },
+      const { share } = await runtime.api.request("POST", "/api/v1/texts", {
+        body: { destination, content: draft, expiresIn },
         schema: shareResponse,
       });
       setDraft("");
       refresh();
+      if (destination === "link_only") setLinkShare(share);
     } catch (e) {
       setError(textError(e));
     } finally {
@@ -78,9 +90,11 @@ export function Composer() {
   const sendFiles = async () => {
     if (!runtime || files.length === 0) return;
     const selected = files;
+    const target = destination;
     setFiles([]);
     setError(null);
-    await uploadFiles({ api: runtime.api, files: selected, expiresIn, uploads, onFinished: refresh });
+    const share = await uploadFiles({ api: runtime.api, files: selected, expiresIn, destination: target, uploads, onFinished: refresh });
+    if (share && target === "link_only") setLinkShare(share);
   };
 
   const canPost = tab === "text" ? draft.trim().length > 0 && !tooLong && !busy : files.length > 0 && oversized.length === 0 && !tooMany;
@@ -139,28 +153,42 @@ export function Composer() {
         </Tabs>
 
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <Select value={String(expiresIn)} onValueChange={(v) => setExpiresIn(Number(v))}>
-            <SelectTrigger size="sm" aria-label="Expires after">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {FREE_LIMITS.localExpiryOptionsSeconds.map((seconds) => (
-                <SelectItem key={seconds} value={String(seconds)}>
-                  Expires after {EXPIRY_LABELS[seconds]}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+          <div className="flex flex-wrap gap-2">
+            {localAvailable && (
+              <Select value={chosen} onValueChange={(v) => setChosen(v as Destination)}>
+                <SelectTrigger size="sm" aria-label="Post to" data-testid="composer-destination">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="network">This network</SelectItem>
+                  <SelectItem value="link_only">Link only</SelectItem>
+                </SelectContent>
+              </Select>
+            )}
+            <Select value={String(expiresIn)} onValueChange={(v) => setExpiresIn(Number(v))}>
+              <SelectTrigger size="sm" aria-label="Expires after">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {FREE_LIMITS.localExpiryOptionsSeconds.map((seconds) => (
+                  <SelectItem key={seconds} value={String(seconds)}>
+                    Expires after {EXPIRY_LABELS[seconds]}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
           <Button onClick={() => void (tab === "text" ? postText() : sendFiles())} disabled={!canPost} data-testid="composer-submit">
             <Send aria-hidden />
-            Share to this network
+            {destination === "network" ? "Share to this network" : "Post and get a link"}
           </Button>
         </div>
         <p className="text-xs text-muted-foreground" data-testid="audience-line">
-          {AUDIENCE}
+          {destination === "network" ? AUDIENCE : LINK_ONLY_AUDIENCE}
         </p>
         {error && <p className="text-sm text-destructive">{error}</p>}
       </CardContent>
+      {linkShare && <ShareLinkDialog share={linkShare} open onOpenChange={(open) => !open && setLinkShare(null)} />}
     </Card>
   );
 }

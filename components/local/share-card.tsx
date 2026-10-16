@@ -1,6 +1,6 @@
 "use client";
 
-import { Copy, Download, FileText, Pencil, Trash2 } from "lucide-react";
+import { Copy, Download, FileText, Flag, Link2, Pencil, Trash2 } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -20,9 +20,9 @@ import { expiresIn, formatBytes, timeAgo } from "./format";
 import { LinkedText } from "./linked-text";
 
 /**
- * One local share. Everyone who can see it may copy text and download files; only its
- * creator may edit or delete it (DEC-033). Risky files need a confirmation (03 §7.4).
- * Presentational: data and actions come from the container.
+ * One share. Everyone who can see it may copy text, download files and report it; only its
+ * creator may edit, delete or share it by link (DEC-033). Risky files need a confirmation
+ * (03 §7.4). Presentational: data and actions come from the container.
  */
 
 export type ShareActions = {
@@ -66,10 +66,16 @@ export function ShareCard({
   share,
   actions,
   renderPreview,
+  onShareByLink,
+  onReport,
 }: {
   share: ShareDto;
   actions: ShareActions;
   renderPreview?: (file: FileDto) => ReactNode;
+  /** Creator only (Phase 2): make a link, QR code or code. */
+  onShareByLink?: () => void;
+  /** Everyone else (Phase 2): report the share. */
+  onReport?: () => void;
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(share.text?.content ?? "");
@@ -112,7 +118,10 @@ export function ShareCard({
           {" · "}
           {timeAgo(share.createdAt)}
         </p>
-        <Badge variant="secondary">{expiresIn(share.expiresAt)}</Badge>
+        <span className="flex gap-1">
+          {share.scope === "link_only" && <Badge variant="outline">Link only</Badge>}
+          <Badge variant="secondary">{expiresIn(share.expiresAt)}</Badge>
+        </span>
       </CardHeader>
       <CardContent className="space-y-3">
         {share.text &&
@@ -178,10 +187,22 @@ export function ShareCard({
               Edit
             </Button>
           )}
+          {share.isMine && onShareByLink && share.status === "active" && (
+            <Button size="sm" variant="ghost" onClick={onShareByLink}>
+              <Link2 aria-hidden />
+              Share link
+            </Button>
+          )}
           {share.isMine && (
             <Button size="sm" variant="ghost" disabled={busy} onClick={() => run(actions.remove)}>
               <Trash2 aria-hidden />
               Delete
+            </Button>
+          )}
+          {!share.isMine && onReport && (
+            <Button size="sm" variant="ghost" onClick={onReport}>
+              <Flag aria-hidden />
+              Report
             </Button>
           )}
         </div>

@@ -1,5 +1,5 @@
 import type { StoreApi } from "zustand/vanilla";
-import { createFileShareResponse, shareResponse, type UploadTarget } from "@/lib/shared/api/schemas";
+import { createFileShareResponse, shareResponse, type ShareDto, type UploadTarget } from "@/lib/shared/api/schemas";
 import type { ApiClient } from "./api-client";
 import { ApiRequestError } from "./api-error";
 import type { UploadsState } from "./stores/uploads";
@@ -53,19 +53,26 @@ export function uploadErrorMessage(error: unknown): string {
         return "The upload took too long. Please start again.";
       case "RATE_LIMITED":
         return "Too many uploads. Wait a moment and try again.";
+      case "REMOTE_FILE_BLOCKED":
+        return "Programs, scripts, installers and disk images can't be shared by link.";
+      case "REMOTE_LINKS_DISABLED":
+        return "Sharing by link is paused right now.";
     }
   }
   return error instanceof Error ? error.message : "Upload failed.";
 }
 
+/** Uploads the files as one share; resolves to the finished share, or null if it failed. */
 export async function uploadFiles(options: {
   api: ApiClient;
   files: File[];
   expiresIn: number;
+  /** This network, or Link only (DEC-033). */
+  destination?: "network" | "link_only";
   uploads: StoreApi<UploadsState>;
   onFinished: () => void;
-}): Promise<boolean> {
-  const { api, files, expiresIn, uploads } = options;
+}): Promise<ShareDto | null> {
+  const { api, files, expiresIn, uploads, destination = "network" } = options;
   const batchId = uploads.getState().addBatch(files.map((f) => ({ name: f.name, size: f.size })));
   // addBatch appends one item per file, in file order.
   const itemIds = uploads
@@ -76,7 +83,7 @@ export async function uploadFiles(options: {
   try {
     const init = await api.request("POST", "/api/v1/shares", {
       body: {
-        destination: "network",
+        destination,
         expiresIn,
         files: files.map((f) => ({ name: f.name, size: f.size, type: f.type || "application/octet-stream" })),
       },
@@ -85,6 +92,7 @@ export async function uploadFiles(options: {
     });
     if (init.uploads.length !== files.length) throw new Error("Unexpected upload plan");
 
+    let share = init.share;
     for (const [index, target] of init.uploads.entries()) {
       const file = files[index] as File;
       if (target.sizeBytes !== file.size) throw new Error("Unexpected upload plan");
@@ -96,17 +104,19 @@ export async function uploadFiles(options: {
       update({ status: "uploading" });
       await putWithProgress(target, file, (loaded) => update({ loaded }));
       update({ status: "verifying", loaded: file.size });
-      await api.request("POST", `/api/v1/shares/${init.share.id}/files/${target.fileId}/complete`, {
-        body: {},
-        schema: shareResponse,
-      });
+      share = (
+        await api.request("POST", `/api/v1/shares/${init.share.id}/files/${target.fileId}/complete`, {
+          body: {},
+          schema: shareResponse,
+        })
+      ).share;
       update({ status: "done" });
     }
     options.onFinished();
-    return true;
+    return share;
   } catch (error) {
     uploads.getState().failBatch(batchId, uploadErrorMessage(error));
     options.onFinished();
-    return false;
+    return null;
   }
 }

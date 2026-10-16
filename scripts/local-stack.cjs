@@ -27,6 +27,8 @@ const LOCAL = {
   appServerDatabaseUrl: "postgresql://app_server:app-server-local-only@127.0.0.1:54322/postgres",
   adminDatabaseUrl: "postgresql://postgres:postgres@127.0.0.1:54322/postgres",
   networkKeySecret: "local-only-network-key-secret-0000000000000001",
+  linkPepper: "local-only-link-pepper-000000000000000000000001",
+  codePepper: "local-only-code-pepper-000000000000000000000001",
 };
 
 function docker(args) {
@@ -136,6 +138,8 @@ function printEnv() {
     `R2_SECRET_ACCESS_KEY=${STORAGE.secretAccessKey}`,
     `NETWORK_KEY_SECRET_CURRENT=${LOCAL.networkKeySecret}`,
     "NETWORK_KEY_VERSION=1",
+    `LINK_PEPPER=${LOCAL.linkPepper}`,
+    `CODE_PEPPER=${LOCAL.codePepper}`,
     "# A local browser has no trusted client IP (it connects from 127.0.0.1). Pretend every",
     "# request without X-Test-Client-IP comes from one network, so two local browsers share it.",
     "ALLOW_TEST_CLIENT_IP=1",

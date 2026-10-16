@@ -11,6 +11,7 @@ import type { ShareDto } from "@/lib/shared/api/schemas";
 const baseShare: ShareDto = {
   id: "11111111-1111-4111-8111-111111111111",
   kind: "text",
+  scope: "network",
   status: "active",
   createdAt: new Date(Date.now() - 60_000).toISOString(),
   expiresAt: new Date(Date.now() + 23 * 3600_000).toISOString(),

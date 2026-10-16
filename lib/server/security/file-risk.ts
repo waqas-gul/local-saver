@@ -2,14 +2,15 @@ import "server-only";
 
 /**
  * Risky file flags (03 §7.4). Local shares allow these files with a warning badge and a
- * confirmation before download; remote-link rules arrive in Phase 2.
- * Detection uses the extension and the magic bytes.
+ * confirmation before download; what may go into a remote link is decided by file-policy.ts.
+ * Detection uses the extension and the magic bytes. Installers count as executables.
  */
 
 export type RiskFlag = "executable" | "script" | "archive" | "double_extension" | "disk_image";
 
 const EXECUTABLE = new Set([
-  "exe", "msi", "msp", "dll", "scr", "com", "pif", "cpl", "apk", "jar", "appx", "msix", "deb", "rpm",
+  "exe", "msi", "msp", "dll", "scr", "com", "pif", "cpl", "apk", "xapk", "jar", "appx", "msix", "deb", "rpm",
+  "pkg", "mpkg", "appimage",
 ]);
 const SCRIPT = new Set([
   "bat", "cmd", "ps1", "psm1", "vbs", "vbe", "js", "jse", "wsf", "wsh", "hta", "lnk", "reg", "sh", "command", "scpt",

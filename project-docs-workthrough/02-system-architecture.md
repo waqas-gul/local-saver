@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Document status | PROPOSED — awaiting owner review |
-| Last updated | 2026-10-15 (Phase 1 as built: bearer-token API auth, no session refresh in `proxy.ts`, module layout, preview query key; second review pass: principle 8 on raw IPs). Earlier: 2026-09-29 (DEC-035: shadcn/ui initialized); 2026-09-23 (CR-001, DEC-034). |
+| Last updated | 2026-10-15 (Phase 2 as built: §3.2 link-viewer boundary, §3.3 link query keys, §6.2 Phase 2 rows implemented plus the code endpoint, §7 layout). Earlier the same day: Phase 1 as built (bearer-token API auth, no session refresh in `proxy.ts`, module layout, preview query key; principle 8 on raw IPs). 2026-09-29 (DEC-035: shadcn/ui initialized); 2026-09-23 (CR-001, DEC-034). |
 | Related decisions | DEC-001 … DEC-035 in [06-decisions-and-risks.md](06-decisions-and-risks.md) |
 | Related docs | Security and network design in [03](03-security-and-network-design.md). Schema, storage and cleanup in [04](04-database-and-storage-design.md). Plans in [07](07-plans-and-entitlements.md). Deployment in [08](08-deployment-and-operations.md). |
 
@@ -145,6 +145,7 @@ flowchart TB
 | Internet → Cloudflare | All traffic | TLS, WAF, rate-limit rule, bot protection |
 | Cloudflare → origin | HTTP requests | Origin secret header (Transform Rule) checked in `proxy.ts`. `CF-Connecting-IP` trusted **only** when the secret is valid (DEC-004). Better: Cloudflare Tunnel on a VPS. |
 | Browser → API | JSON over HTTPS with the Supabase access token as `Authorization: Bearer` (phase 1 DV1-14) | JWT verification, device ownership check, Origin check on mutations, zod validation, rate limits |
+| Link viewer → API (Phase 2, as built) | JSON over HTTPS; the link secret once in the unlock body (or a short code), then only the httpOnly `__Host-link_session` cookie | Timing-safe HMAC check with a uniform 404, grants re-checked with the link and share on every request, Origin check on mutations, SameSite=Lax, rate limits per link, network key and session |
 | Browser → R2 | Presigned URLs | Scoped to one object and one method. Short TTL. Content-Type/Disposition signed. Bucket CORS limited to app origins. |
 | Browser → Supabase Realtime | WebSocket with the user's JWT | Private channels only ("Allow public access" disabled). RLS on `realtime.messages`. |
 | Next.js → Postgres | Pooled TCP (TLS) | Dedicated DB role with least privilege on the `app` schema. Credentials in env. |
@@ -183,7 +184,8 @@ flowchart LR
 | `['preview', fileId]` | 300 s preview URL for an image (Phase 1) | Refetched after 4 minutes. Removed with the network's other data. |
 | `['me']`, `['me', 'entitlements']` (Phase 4) | Account, plan, limits | Refetch on focus |
 | `['history', …]` (Phase 4) | Transfer history | On demand |
-| `['link', linkId, 'content']` (Phase 2) | Link-viewer DTO | 30 s refetch interval and on focus. No Realtime. |
+| `['link', linkId, 'content']` (Phase 2) | Link-viewer DTO | 30 s refetch interval and on focus. No Realtime. As built: a 404 or 410 replaces the content and stops polling; previews are `['link', linkId, 'preview', fileId]`. |
+| `['me', 'links', shareId]` (Phase 2, as built) | The creator's links to a share (no secrets) | While the share-link dialog is open; invalidated after create, revoke or a new code |
 | `['room', roomId, 'shares']` (Phase 4) | Private-room content | Realtime-invalidated on `room:` |
 
 **Rules that matter for security** (full list in DEC-034):
@@ -427,7 +429,7 @@ Policies live on `realtime.messages` and call a `SECURITY DEFINER` helper, `app_
 
 ### 6.2 Endpoint catalogue (by phase)
 
-**Phase 1 rows are implemented** (2026-10-15) except the probe. Request and response contracts: `lib/shared/api/schemas.ts`. `POST /api/v1/shares` and `POST /api/v1/texts` answer `201`; `DELETE` answers `204`. Error codes added in Phase 1: `UNAUTHENTICATED`, `DEVICE_REQUIRED`, `DEVICE_UNKNOWN` (401); `NOT_CREATOR`, `USER_SUSPENDED`, `UPLOADS_RESTRICTED` (403); `NOT_FOUND` (404, also for "not visible"); `LOCAL_SHARING_UNAVAILABLE`, `VERSION_CONFLICT`, `UPLOAD_INCOMPLETE`, `UPLOAD_EXPIRED`, `STORAGE_QUOTA_EXCEEDED` (409); `FILE_TOO_LARGE`, `TOO_MANY_FILES`, `TEXT_TOO_LARGE` (413); `EXPIRY_NOT_ALLOWED`, `UPLOAD_REJECTED`, `PREVIEW_UNAVAILABLE` (422); `RATE_LIMITED`, `DAILY_UPLOAD_LIMIT` (429 with `Retry-After`); `UPLOADS_DISABLED`, `SERVICE_NOT_CONFIGURED` (503).
+**Phase 1 and Phase 2 rows are implemented** (2026-10-15) except the probe; Phase 2 adds error codes `LINK_UNAVAILABLE`, `CODE_UNAVAILABLE` (404), `LINK_EXPIRED` (410), `TURNSTILE_REQUIRED` (403), `LINK_NOT_ACTIVE` (409), `REMOTE_FILE_BLOCKED` (422), `LINK_DAILY_LIMIT` (429), `REMOTE_LINKS_DISABLED`, `SHORT_CODES_DISABLED` (503); link creation answers `201`, revocation `204`; link creation takes no `Idempotency-Key` (phase 2 DV2-4). As-built summary: [ARCHITECTURE.md §9](ARCHITECTURE.md#9-remote-sharing). Request and response contracts: `lib/shared/api/schemas.ts`. `POST /api/v1/shares` and `POST /api/v1/texts` answer `201`; `DELETE` answers `204`. Error codes added in Phase 1: `UNAUTHENTICATED`, `DEVICE_REQUIRED`, `DEVICE_UNKNOWN` (401); `NOT_CREATOR`, `USER_SUSPENDED`, `UPLOADS_RESTRICTED` (403); `NOT_FOUND` (404, also for "not visible"); `LOCAL_SHARING_UNAVAILABLE`, `VERSION_CONFLICT`, `UPLOAD_INCOMPLETE`, `UPLOAD_EXPIRED`, `STORAGE_QUOTA_EXCEEDED` (409); `FILE_TOO_LARGE`, `TOO_MANY_FILES`, `TEXT_TOO_LARGE` (413); `EXPIRY_NOT_ALLOWED`, `UPLOAD_REJECTED`, `PREVIEW_UNAVAILABLE` (422); `RATE_LIMITED`, `DAILY_UPLOAD_LIMIT` (429 with `Retry-After`); `UPLOADS_DISABLED`, `SERVICE_NOT_CONFIGURED` (503).
 
 | Phase | Method & path | Purpose | Caller |
 |---|---|---|---|
@@ -446,6 +448,7 @@ Policies live on `realtime.messages` and call a `SECURITY DEFINER` helper, `app_
 | 2 | `POST /api/v1/shares` and `POST /api/v1/texts` accept `destination: "link_only"` | Shares that are never visible on any network | Any device |
 | 2 | `POST /api/v1/shares/{shareId}/links` · `GET …/links` | Create / list share links | Share creator |
 | 2 | `DELETE /api/v1/links/{linkId}` | Revoke link | Link creator (room owner from Phase 4) |
+| 2 | `POST /api/v1/links/{linkId}/code` | New short code for a link; the old one stops working (as built, phase 2 DV2-5) | Link creator |
 | 2 | `POST /api/v1/links/{linkId}/unlock` | Prove the secret and create a link grant | Anyone with the link |
 | 2 | `GET /api/v1/links/{linkId}/content` | Viewer DTO (files, text) | Grant holder |
 | 2 | `POST /api/v1/links/{linkId}/files/{fileId}/download-url` · `…/preview-url` | Presigned GET | Grant holder |
@@ -476,21 +479,24 @@ No `src/` directory. The existing `@/*` → `./*` alias stays.
 
 ```text
 app/
-  layout.tsx, globals.css, page.tsx          # modified: product shell, providers, "This network" home
+  layout.tsx, globals.css                    # root: CSP nonce, public config (route groups add their providers, phase 2 DV2-12)
+  (app)/layout.tsx, (app)/page.tsx           # the app's providers; "This network" home (moved here in Phase 2)
   (app)/uploads/page.tsx                     # My uploads
   (app)/rooms/[roomId]/page.tsx              # private rooms (Phase 4)
   (app)/settings/…                           # Phase 4
-  (share)/s/[linkId]/page.tsx                # link viewer (Phase 2)
-  (share)/c/page.tsx                         # short-code entry (Phase 2)
+  (share)/layout.tsx                         # viewer providers only, generic metadata (Phase 2, built)
+  (share)/s/[linkId]/page.tsx                # link viewer (Phase 2, built)
+  (share)/c/page.tsx                         # short-code entry (Phase 2, built)
   (share)/j/[inviteId]/page.tsx              # private-room invite / pairing accept (Phase 4)
-  (legal)/terms, privacy, acceptable-use, report   # Phase 2–3
+  (legal)/terms, privacy, acceptable-use, report   # drafts built in Phase 2; legal review before public beta
   api/v1/**/route.ts                         # thin handlers (§6.2)
 proxy.ts                                     # headers/CSP, origin lock, request id (no session refresh, DV1-6)
 instrumentation.ts                           # boot-time env validation → lib/server/boot.ts (exits on bad env)
 components.json                              # shadcn/ui CLI configuration (radix-nova, DEC-035)
 components/ui/*                              # shadcn/ui generated: button, card, textarea, badge, dialog, progress, tabs, select, alert
 components/local/*                           # Phase 1: home, composer, share card, feed list, upload queue, My uploads, status, notice, copy.ts
-components/{room,share,qr}/*                 # later phases
+components/{share,qr,report,legal}/*        # Phase 2 (built): link dialog, share page, code entry, QR, reports, legal frame
+components/room/*                            # Phase 4
 lib/utils.ts                                 # shadcn alias target: re-exports cn()
 lib/shared/
   api/schemas.ts                             # zod contracts for /api/v1 (server validation + client parsing)
@@ -510,7 +516,9 @@ lib/server/                                  # import 'server-only'
   network/ (normalize, client-ip, key, current, observe)  local/visibility.ts
   shares/ (dto, read, create, complete, text, end, download, expiry)  devices/ (labels, service)
   storage/ (s3, keys, sniff)  security/ (crypto, ids, origin-lock, headers, filenames, content-disposition, file-risk)
-  links/ (2)  rooms/ (4)  billing/ (4)  workspaces/ (5)
+  links/ (secrets, cookies, sessions, grants, create, unlock, codes, viewer; Phase 2)  abuse/reports.ts (2)
+  security/ (file-policy, turnstile; Phase 2)  network/requester.ts (2)
+  rooms/ (4)  billing/ (4)  workspaces/ (5)
 supabase/
   config.toml, seed.sql                      # seed: local-only app_server login
   migrations/*.sql                           # SQL-first, source of truth

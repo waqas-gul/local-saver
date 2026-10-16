@@ -71,6 +71,23 @@ describe("topic authorization", () => {
 });
 
 describe("delivery", () => {
+  it("a link-only share is never signalled on the network, only to its creator (T-012, Phase 2)", async () => {
+    const net = newNetwork();
+    const a = await device(net.ip());
+    const b = await device(net.ip());
+    const [spaceId] = (await b.observe()).spaceIds;
+    const network = await join(b, `net:${spaceId}`);
+    const creator = await join(a, `user:${a.userId}`);
+    expect([network.status, creator.status]).toEqual(["SUBSCRIBED", "SUBSCRIBED"]);
+
+    const linkOnly = await a.postText("only by link", undefined, "link_only");
+    const local = await a.postText("on the network");
+    // The local post arriving proves the channel works; the link-only one must never come.
+    expect(await waitFor(() => network.messages.some((m) => m.shareId === local.id), 3_000)).toBe(true);
+    expect(await waitFor(() => creator.messages.some((m) => m.shareId === linkOnly.id), 3_000)).toBe(true);
+    expect(network.messages.some((m) => m.shareId === linkOnly.id)).toBe(false);
+  });
+
   it("a new local share reaches other devices on the network within 2 s, as IDs only (AC-1.1, T-018)", async () => {
     const net = newNetwork();
     const a = await device(net.ip());

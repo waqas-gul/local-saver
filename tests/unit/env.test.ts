@@ -22,6 +22,16 @@ const phase1Services = {
   NEXT_PUBLIC_TURNSTILE_SITE_KEY: "0x4AAAAAAAsitekey",
 };
 
+const LINK_PEPPER = "link-pepper-that-is-long-enough-000000001";
+const CODE_PEPPER = "code-pepper-that-is-long-enough-000000001";
+
+// Phase 2: link and code peppers (03 §12) and server-side Turnstile verification (DV2-6).
+const phase2Services = {
+  LINK_PEPPER,
+  CODE_PEPPER,
+  TURNSTILE_SECRET_KEY: "0x4AAAAAAAturnstile-secret-key-0001",
+};
+
 const deployed = {
   NODE_ENV: "production",
   APP_ENV: "production",
@@ -30,6 +40,7 @@ const deployed = {
   NEXT_PUBLIC_APP_ORIGIN: "https://app.example.com",
   APP_ALLOWED_ORIGINS: "https://app.example.com",
   ...phase1Services,
+  ...phase2Services,
 };
 
 function issuesOf(fn: () => unknown): string[] {
@@ -240,6 +251,68 @@ describe("parseEnv", () => {
       parseEnv({ APP_ENV: "test", ALLOW_TEST_CLIENT_IP: "1", TRUST_PROXY_MODE: "cloudflare", ORIGIN_SHARED_SECRET: SECRET }),
     );
     expect(issues.join("\n")).toMatch(/ALLOW_TEST_CLIENT_IP/);
+  });
+
+  it("requires the link and code peppers and the Turnstile secret when deployed (Phase 2)", () => {
+    const withoutPhase2 = Object.fromEntries(Object.entries(deployed).filter(([key]) => !(key in phase2Services)));
+    const text = issuesOf(() => parseEnv(withoutPhase2)).join("\n");
+    for (const name of ["LINK_PEPPER", "CODE_PEPPER", "TURNSTILE_SECRET_KEY"]) expect(text).toContain(name);
+  });
+
+  it("rejects short or placeholder peppers", () => {
+    expect(issuesOf(() => parseEnv({ LINK_PEPPER: "short" })).join("\n")).toMatch(/LINK_PEPPER/);
+    expect(issuesOf(() => parseEnv({ CODE_PEPPER: "short" })).join("\n")).toMatch(/CODE_PEPPER/);
+    expect(
+      issuesOf(() => parseEnv({ ...deployed, CODE_PEPPER: "changeme-changeme-changeme-changeme-00" })).join("\n"),
+    ).toMatch(/CODE_PEPPER: looks like a placeholder/);
+  });
+
+  it("refuses one value for both peppers", () => {
+    expect(issuesOf(() => parseEnv({ LINK_PEPPER, CODE_PEPPER: LINK_PEPPER })).join("\n")).toMatch(/CODE_PEPPER/);
+  });
+
+  it("lists peppers by version, current first (rotation, 03 §12)", () => {
+    const env = parseEnv({
+      LINK_PEPPER,
+      LINK_PEPPER_PREVIOUS: "link-pepper-that-is-long-enough-000000000",
+      CODE_PEPPER,
+      PEPPER_VERSION: "2",
+    });
+    expect(env.linkPeppers).toEqual([
+      { version: 2, secret: LINK_PEPPER },
+      { version: 1, secret: "link-pepper-that-is-long-enough-000000000" },
+    ]);
+    expect(env.codePeppers).toEqual([{ version: 2, secret: CODE_PEPPER }]);
+    expect(parseEnv({}).linkPeppers).toEqual([]);
+    expect(
+      issuesOf(() => parseEnv({ LINK_PEPPER, LINK_PEPPER_PREVIOUS: "link-pepper-that-is-long-enough-000000000" })).join("\n"),
+    ).toMatch(/PEPPER_VERSION/);
+    expect(issuesOf(() => parseEnv({ CODE_PEPPER_PREVIOUS: CODE_PEPPER })).join("\n")).toMatch(/CODE_PEPPER/);
+  });
+
+  it("verifies Turnstile only with a secret, and only next to a site key", () => {
+    expect(parseEnv({}).turnstile).toBeNull();
+    expect(parseEnv(deployed).turnstile).toEqual({
+      secretKey: phase2Services.TURNSTILE_SECRET_KEY,
+      verifyUrl: "https://challenges.cloudflare.com/turnstile/v0/siteverify",
+    });
+    expect(issuesOf(() => parseEnv({ TURNSTILE_SECRET_KEY: "secret" })).join("\n")).toMatch(/NEXT_PUBLIC_TURNSTILE_SITE_KEY/);
+  });
+
+  it("allows another Turnstile verify URL only in local and test runs", () => {
+    const url = "http://127.0.0.1:3299/siteverify";
+    const env = parseEnv({
+      APP_ENV: "test",
+      NODE_ENV: "test",
+      TURNSTILE_SECRET_KEY: "test-secret",
+      NEXT_PUBLIC_TURNSTILE_SITE_KEY: "test-site-key",
+      TURNSTILE_VERIFY_URL: url,
+    });
+    expect(env.turnstile?.verifyUrl).toBe(url);
+    expect(issuesOf(() => parseEnv({ ...deployed, TURNSTILE_VERIFY_URL: url })).join("\n")).toMatch(/TURNSTILE_VERIFY_URL/);
+    expect(
+      issuesOf(() => parseEnv({ NODE_ENV: "production", APP_ENV: "local", TURNSTILE_VERIFY_URL: url })).join("\n"),
+    ).toMatch(/TURNSTILE_VERIFY_URL/);
   });
 
   it("never includes secret values in error messages", () => {

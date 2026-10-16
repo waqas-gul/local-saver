@@ -41,6 +41,18 @@ describe("sniff (03 §7.3, T-025)", () => {
     expect(sniff(bytes("PK", [3, 4, 20, 0]))).toMatchObject({ mime: "application/zip", archive: true });
   });
 
+  it("detects Java and Android packages (ZIPs whose first entry is a manifest) as executables (03 §7.4)", () => {
+    const localHeader = (name: string) => {
+      const header = Buffer.alloc(30);
+      header.writeUInt32LE(0x04034b50, 0);
+      header.writeUInt16LE(Buffer.byteLength(name), 26);
+      return bytes([...header], name, "...");
+    };
+    expect(sniff(localHeader("META-INF/MANIFEST.MF"))).toMatchObject({ executable: true, archive: true });
+    expect(sniff(localHeader("AndroidManifest.xml"))).toMatchObject({ executable: true, archive: true });
+    expect(sniff(localHeader("photos/one.jpg"))).toMatchObject({ executable: false, archive: true });
+  });
+
   it("returns nothing special for plain text or empty input", () => {
     expect(sniff(bytes("hello world"))).toEqual({
       mime: null,

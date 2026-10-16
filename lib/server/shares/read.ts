@@ -25,6 +25,7 @@ export function isUuid(value: string): boolean {
 export type VisibleShare = {
   id: string;
   kind: string;
+  scope: string;
   status: string;
   networkSpaceId: string | null;
   createdByUserId: string | null;
@@ -59,6 +60,7 @@ export async function findVisibleShare(caller: Caller, network: NetworkView, sha
   return {
     id: row.id,
     kind: row.kind,
+    scope: row.scope,
     status: row.status,
     networkSpaceId: row.network_space_id,
     createdByUserId: row.created_by_user_id,

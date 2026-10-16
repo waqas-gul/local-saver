@@ -15,8 +15,9 @@ import { ShareList } from "./share-list";
 import { UploadQueue } from "./upload-queue";
 
 /**
- * "This network" home (Phase 1 UI): network line, composer with the audience line, uploads and the
- * local feed. Opening the page on a network shows what was posted there; no join step.
+ * "This network" home: network line, composer with the audience line, uploads and the local
+ * feed. Opening the page on a network shows what was posted there; no join step. Where local
+ * sharing is off, the composer offers Link only (Phase 2 fallback: link, QR code or code).
  */
 function LocalNetwork() {
   const runtime = useRuntime();
@@ -43,7 +44,7 @@ function LocalNetwork() {
     <div className="space-y-4">
       <NetworkStatusPanel status={status.status} reason={status.reason} devicesHere={devicesHere} />
       <FirstVisitNotice active={ok} />
-      {ok && <Composer />}
+      <Composer localAvailable={ok} />
       <UploadQueue />
       {ok && incoming.length > 0 && (
         <p className="text-sm text-muted-foreground">

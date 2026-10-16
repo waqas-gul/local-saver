@@ -10,9 +10,10 @@ import { resolveEntitlements } from "../entitlements/plans";
 import type { Env } from "../env";
 import { ApiError } from "../http/errors";
 import type { NetworkView } from "../network/current";
-import { assertCanPost } from "../policy/posting";
+import { postingTarget } from "../policy/posting";
 import { enforceDailyVolume, enforceRateLimit } from "../ratelimit/limits";
 import { contentDisposition } from "../security/content-disposition";
+import { assertRemoteAllowed } from "../security/file-policy";
 import { riskFlags } from "../security/file-risk";
 import { sanitizeFilename } from "../security/filenames";
 import { objectKey, storedContentType } from "../storage/keys";
@@ -23,7 +24,8 @@ import { resolveExpiry } from "./expiry";
 /**
  * Upload init (04 §8.5, 02 §4.3): validate, reserve storage per file, insert the share as
  * pending_upload, and return one presigned PUT per file with the headers that are signed.
- * Single PUT only (≤ 100 MB, DEC-026).
+ * Single PUT only (≤ 100 MB, DEC-026). The destination is this network or Link only (DEC-033);
+ * link-only files must pass the remote file policy, by name here and by content at completion.
  */
 
 const UPLOAD_DEADLINE = "2 hours"; // completion deadline (04 §7.2)
@@ -129,9 +131,13 @@ export async function createFileShare(
   body: z.infer<typeof createFileShareBody>,
   env: Env,
   idempotencyKey: string | null,
+  request: Request,
 ): Promise<CreateFileShareResult> {
   // Posting rules first: a replay must not hand out upload URLs once posting is refused.
-  const spaceId = await assertCanPost(caller, network, env, { files: true });
+  const { spaceId, networkLimitKey } = await postingTarget(caller, network, request, env, {
+    files: true,
+    destination: body.destination,
+  });
   const keyHash = idempotencyKey ? idempotencyHash(idempotencyKey) : null;
   if (keyHash) {
     const previous = await replay(caller, env, keyHash);
@@ -149,10 +155,6 @@ export async function createFileShare(
   const expiry = resolveExpiry(entitlements, body.expiresIn);
   const totalBytes = body.files.reduce((sum, f) => sum + f.size, 0);
 
-  await enforceRateLimit("createShare", caller.principal.userId);
-  await enforceDailyVolume(`user:${caller.principal.userId}`, totalBytes, limits.dailyUploadBytes);
-  await enforceDailyVolume(`net:${spaceId}`, totalBytes, limits.dailyUploadBytesPerNetwork);
-
   const now = new Date();
   const files = body.files.map((f) => {
     const id = randomUUID();
@@ -167,6 +169,12 @@ export async function createFileShare(
       flags: riskFlags({ name, extension }, NO_CONTENT_SIGNALS),
     };
   });
+  // A link-only share exists to be sent by link: refuse what a link may not carry (T-035).
+  if (body.destination === "link_only") assertRemoteAllowed(files.map((f) => ({ riskFlags: f.flags })), entitlements);
+
+  await enforceRateLimit("createShare", caller.principal.userId);
+  await enforceDailyVolume(`user:${caller.principal.userId}`, totalBytes, limits.dailyUploadBytes);
+  await enforceDailyVolume(`net:${networkLimitKey}`, totalBytes, limits.dailyUploadBytesPerNetwork);
 
   let shareId: string;
   try {
@@ -174,7 +182,7 @@ export async function createFileShare(
       const share = await trx
         .insertInto("app.shares")
         .values({
-          scope: "network",
+          scope: body.destination,
           network_space_id: spaceId,
           kind: "files",
           created_by_user_id: caller.principal.userId,
@@ -235,7 +243,7 @@ export async function createFileShare(
         networkSpaceId: spaceId,
         targetType: "share",
         targetId: share.id,
-        metadata: { kind: "files", scope: "network", fileCount: files.length, totalBytes },
+        metadata: { kind: "files", scope: body.destination, fileCount: files.length, totalBytes },
       });
       if (keyHash) {
         await trx

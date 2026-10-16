@@ -6,7 +6,8 @@ import { z } from "zod";
  *
  * Phase 1 adds the network key secrets (DEC-032), the IPv6 prefix length and the
  * local-only default test IP, and requires every Phase 1 service when deployed.
- * Link and code peppers join in Phase 2.
+ * Phase 2 adds the versioned link and code peppers (03 §12) and the Turnstile secret, which the
+ * server now uses to verify challenges (code-guessing escalation, abuse reports; DV2-6).
  */
 
 const APP_ENVS = ["local", "test", "staging", "production"] as const;
@@ -14,6 +15,7 @@ const DEPLOYED: readonly string[] = ["staging", "production"];
 const LOCAL_DEFAULT_ORIGIN = "http://localhost:3000";
 const MIN_SECRET_LENGTH = 32;
 const PLACEHOLDER = /change[-_ ]?me|placeholder|your[-_]|example|xxxx|<.*>/i;
+const TURNSTILE_SITEVERIFY = "https://challenges.cloudflare.com/turnstile/v0/siteverify";
 
 const optionalString = z
   .string()
@@ -58,6 +60,17 @@ const schema = z.object({
   NETWORK_IPV6_PREFIX_LEN: z.coerce.number().int().min(32).max(128).default(64),
   /** Kill switches are cached at most this long (03 §10: ≤ 30 s). Tests use 0. */
   RUNTIME_FLAGS_CACHE_SECONDS: z.coerce.number().int().min(0).max(300).default(30),
+
+  /** HMAC keys for link secrets and short codes (DEC-013, DEC-014); PREVIOUS only during rotation. */
+  LINK_PEPPER: optionalString,
+  LINK_PEPPER_PREVIOUS: optionalString,
+  CODE_PEPPER: optionalString,
+  CODE_PEPPER_PREVIOUS: optionalString,
+  PEPPER_VERSION: z.coerce.number().int().min(1).max(32767).default(1),
+  /** Server-side Turnstile verification (code escalation, reports). */
+  TURNSTILE_SECRET_KEY: optionalString,
+  /** Tests and local development only: a stand-in for Cloudflare's siteverify endpoint. */
+  TURNSTILE_VERIFY_URL: optionalUrl,
 });
 
 type RawEnv = z.infer<typeof schema>;
@@ -78,8 +91,16 @@ export type Env = RawEnv & {
   /** Client IP assumed without X-Test-Client-IP; only when testClientIpAllowed. */
   testClientIpDefault: string | undefined;
   /** Network key secrets by version, current first (DEC-032). Empty when not configured. */
-  networkKeys: { version: number; secret: string }[];
+  networkKeys: VersionedSecret[];
+  /** Link-secret peppers by version, current first (03 §12). Empty when not configured. */
+  linkPeppers: VersionedSecret[];
+  /** Short-code peppers by version, current first. Empty when not configured. */
+  codePeppers: VersionedSecret[];
+  /** Server-side Turnstile verification; null when no secret is configured. */
+  turnstile: { secretKey: string; verifyUrl: string } | null;
 };
+
+export type VersionedSecret = { version: number; secret: string };
 
 /** Thrown when the environment is invalid. Messages name variables, never values. */
 export class EnvError extends Error {
@@ -101,6 +122,11 @@ const SECRETS: (keyof RawEnv)[] = [
   "R2_SECRET_ACCESS_KEY",
   "NETWORK_KEY_SECRET_CURRENT",
   "NETWORK_KEY_SECRET_PREVIOUS",
+  "LINK_PEPPER",
+  "LINK_PEPPER_PREVIOUS",
+  "CODE_PEPPER",
+  "CODE_PEPPER_PREVIOUS",
+  "TURNSTILE_SECRET_KEY",
 ];
 
 /** Secrets that must be long random values wherever they are set. */
@@ -109,6 +135,10 @@ const MIN_LENGTH_SECRETS = [
   "ORIGIN_SHARED_SECRET_PREVIOUS",
   "NETWORK_KEY_SECRET_CURRENT",
   "NETWORK_KEY_SECRET_PREVIOUS",
+  "LINK_PEPPER",
+  "LINK_PEPPER_PREVIOUS",
+  "CODE_PEPPER",
+  "CODE_PEPPER_PREVIOUS",
 ] as const;
 
 /** Everything Phase 1 needs to serve local sharing; required in staging and production. */
@@ -124,7 +154,31 @@ const REQUIRED_WHEN_DEPLOYED: (keyof RawEnv)[] = [
   "NETWORK_KEY_SECRET_CURRENT",
   // Supabase Auth verifies the Turnstile token on anonymous sign-in (DV1-9).
   "NEXT_PUBLIC_TURNSTILE_SITE_KEY",
+  // Phase 2: remote links and codes, and the server's own Turnstile checks.
+  "LINK_PEPPER",
+  "CODE_PEPPER",
+  "TURNSTILE_SECRET_KEY",
 ];
+
+/** Current secret first, then the previous one under the version below it (rotation). */
+function versioned(
+  issues: string[],
+  current: string | undefined,
+  previous: string | undefined,
+  version: number,
+  names: { current: string; previous: string; version: string },
+): VersionedSecret[] {
+  if (!current) {
+    if (previous) issues.push(`${names.current}: required when ${names.previous} is set`);
+    return [];
+  }
+  const list = [{ version, secret: current }];
+  if (previous) {
+    if (version < 2) issues.push(`${names.version}: must be 2 or more when ${names.previous} is set`);
+    else list.push({ version: version - 1, secret: previous });
+  }
+  return list;
+}
 
 function parseOrigin(value: string): string | null {
   try {
@@ -178,7 +232,7 @@ export function parseEnv(source: Record<string, string | undefined>): Env {
     }
   }
 
-  const networkKeys: { version: number; secret: string }[] = [];
+  const networkKeys: VersionedSecret[] = [];
   if (raw.NETWORK_KEY_SECRET_CURRENT) {
     networkKeys.push({ version: raw.NETWORK_KEY_VERSION, secret: raw.NETWORK_KEY_SECRET_CURRENT });
     if (raw.NETWORK_KEY_SECRET_PREVIOUS) {
@@ -190,6 +244,28 @@ export function parseEnv(source: Record<string, string | undefined>): Env {
     }
   } else if (raw.NETWORK_KEY_SECRET_PREVIOUS) {
     issues.push("NETWORK_KEY_SECRET_CURRENT: required when NETWORK_KEY_SECRET_PREVIOUS is set");
+  }
+
+  const linkPeppers = versioned(issues, raw.LINK_PEPPER, raw.LINK_PEPPER_PREVIOUS, raw.PEPPER_VERSION, {
+    current: "LINK_PEPPER",
+    previous: "LINK_PEPPER_PREVIOUS",
+    version: "PEPPER_VERSION",
+  });
+  const codePeppers = versioned(issues, raw.CODE_PEPPER, raw.CODE_PEPPER_PREVIOUS, raw.PEPPER_VERSION, {
+    current: "CODE_PEPPER",
+    previous: "CODE_PEPPER_PREVIOUS",
+    version: "PEPPER_VERSION",
+  });
+  // Separate keys, so a leak of one hash table can't be checked with the other key.
+  if (raw.LINK_PEPPER && raw.LINK_PEPPER === raw.CODE_PEPPER) {
+    issues.push("CODE_PEPPER: must differ from LINK_PEPPER");
+  }
+
+  if (raw.TURNSTILE_SECRET_KEY && !raw.NEXT_PUBLIC_TURNSTILE_SITE_KEY) {
+    issues.push("NEXT_PUBLIC_TURNSTILE_SITE_KEY: required when TURNSTILE_SECRET_KEY is set (the browser shows the challenge)");
+  }
+  if (raw.TURNSTILE_VERIFY_URL !== undefined && (raw.NODE_ENV === "production" || isDeployed)) {
+    issues.push("TURNSTILE_VERIFY_URL: tests and local development only (refused in production builds and deployments)");
   }
   if ((raw.TRUST_PROXY_MODE === "cloudflare" || isDeployed) && !raw.ORIGIN_SHARED_SECRET) {
     issues.push("ORIGIN_SHARED_SECRET: required in staging, production and whenever TRUST_PROXY_MODE=cloudflare (origin lock, DEC-004)");
@@ -253,6 +329,11 @@ export function parseEnv(source: Record<string, string | undefined>): Env {
     testClientIpAllowed,
     testClientIpDefault: testClientIpAllowed ? raw.TEST_CLIENT_IP_DEFAULT : undefined,
     networkKeys,
+    linkPeppers,
+    codePeppers,
+    turnstile: raw.TURNSTILE_SECRET_KEY
+      ? { secretKey: raw.TURNSTILE_SECRET_KEY, verifyUrl: raw.TURNSTILE_VERIFY_URL ?? TURNSTILE_SITEVERIFY }
+      : null,
   };
 }
 

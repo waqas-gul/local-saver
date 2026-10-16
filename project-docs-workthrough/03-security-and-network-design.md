@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Document status | PROPOSED — awaiting owner review. §3 implements the owner's accepted rule for local mode (DEC-031, CR-001). |
-| Last updated | 2026-10-15 (Phase 1 as built: §3.4–§3.5 fallback, §3.5 stale egress lists fail closed and the prefix-only egress lookup, §7.1 signed, write-once and recorded upload URLs, §7.3 stored-header and deadline checks, §7.7 deleting objects while upload URLs live, §13 IP inventory corrected, §8 bearer tokens, §10 limits, §11 CSP notes) |
+| Last updated | 2026-10-15 (Phase 2 as built: §4.1–§4.4 and §4.8 notes, §7.4 remote policy, §7.6 reports and takedown, §9 matrix tested with link viewers, §10 Phase 2 limits, §12 peppers and the Turnstile secret now used, §13 new data, §14 events). Earlier the same day: Phase 1 as built (§3.4–§3.5 fallback, stale egress lists fail closed, prefix-only egress lookup, §7.1, §7.3, §7.7, §13 IP inventory, §8 bearer tokens, §10 limits, §11 CSP notes) |
 | Key decisions | DEC-031 (ACCEPTED), DEC-032, DEC-033, DEC-004, DEC-013, DEC-014, DEC-015, DEC-020, DEC-021, DEC-024, DEC-025 |
 | Key risks | RISK-001, RISK-002, RISK-004, RISK-005, RISK-007, RISK-008, RISK-009, RISK-013, RISK-025, RISK-026 |
 
@@ -303,6 +303,8 @@ The share page `/s/[linkId]` is a static shell: `noindex`, `Referrer-Policy: no-
 
 Link fields: `expires_at` (≤ share expiry and ≤ plan maximum), `revoked_at`, optional password (Pro), `allow_download`, creator, plan snapshot.
 
+**Phase 2 as built (2026-10-15):** as specified, with the HMAC bound to the link ID (`HMAC(LINK_PEPPER[v], linkId | secret)`), a revocation reason (`creator`, `share_ended`, `blocked`), and the URL built from `NEXT_PUBLIC_APP_ORIGIN`, never the request's Host. A link lasts until its share expires unless a shorter option is chosen (phase 2 DV2-13); a database trigger refuses one that would outlive its share. Password columns wait for Phase 4. Summary: [ARCHITECTURE.md §9](ARCHITECTURE.md#9-remote-sharing).
+
 ### 4.2 Link grants (viewer sessions)
 
 `POST /api/v1/links/{linkId}/unlock { secret, password?, turnstileToken? }`:
@@ -324,11 +326,19 @@ Every viewer endpoint re-checks: grant valid, link active, `password_version` cu
 
 Link viewers get **no Supabase user**. This avoids auth MAU costs (RISK-006). Viewer pages poll instead of subscribing to realtime.
 
+**Phase 2 as built (2026-10-15):**
+
+- Steps 1–3 and 5–6 as specified (no passwords before Phase 4). The cookie is `__Host-link_session` on HTTPS origins and plain `link_session` on the plain-HTTP origins of local development and tests (DV2-3), Max-Age 12 h, refreshed by each unlock or code.
+- **Session fixation:** a presented cookie is reused only if its hash is a live stored session; any other value is ignored and a fresh one issued.
+- **Grant expiry:** `min(now() + 12 h, link.expires_at, share.expires_at)`, also enforced by a check constraint. A grant holder whose link was revoked or expired, or whose share ended, gets `410 LINK_EXPIRED`; a grant that only timed out gets `404` (the link is needed again).
+- Share and code pages run with a query client only: no Supabase client is ever created there (separate route-group layouts, DV2-12).
+
 ### 4.3 QR codes
 
 - Generated **in the browser** from the full URL, including the fragment, with a local library. **Never use a third-party QR image API**, which would receive the secret.
 - Displayed with the expiry time and the warning *"Anyone who scans this can open the share."*
 - Error correction level M. A URL of about 80 characters fits a small, easily scanned code.
+- **Phase 2 as built:** the `qr` library (no dependencies, DV2-8), drawn as one SVG path with a 4-module quiet zone; tests decode the rendered code back to the URL. Real phone scans are a manual step ([phase 2 procedure](phases/phase-2-manual-verification.md)).
 
 ### 4.4 Short codes (DEC-014)
 
@@ -341,6 +351,7 @@ Link viewers get **no Supabase user**. This avoids auth MAU costs (RISK-006). Vi
 | Validity | Default 1 h. Options 10 min / 1 h / 24 h (Free); up to 7 days (Pro). Never beyond the link's expiry. |
 | Resolution | `POST /api/v1/codes/resolve { code }` creates a link grant (≤ 12 h) and returns only `linkId`. **The long-lived link secret is never revealed by a code.** Password-protected links still require the password. |
 | Limits | Per device/session and per network key: 5 failures / 10 min, then Turnstile is required. 20 failures / day per network key gives a 24 h block. Global failure-rate alerting. |
+| **Phase 2 as built** | As specified, with: only failures are counted; the 24 h block runs 24 hours from the 20th failure; without Turnstile configured (local only) the escalation is a wait until the window ends (DV2-19); the global alert is the error log `code.resolve_failure_spike` at 1,000 failures per 10 minutes; a code's expiry is clamped to its link's (DV2-14); "Generate new code" is `POST /api/v1/links/{linkId}/code` (DV2-5); expired codes are cleared by `purge-ephemeral`. |
 
 **Entropy check:**
 
@@ -377,6 +388,7 @@ Local mode has no rooms or invites. Pro **private rooms** are membership-based a
 - Revoking a link sets `revoked_at`. Grants stop working on the **next request**. Presigned GET URLs already issued stay valid for at most 60 s (bearer semantics, RISK-009).
 - Share deletion, expiry, claim or block invalidates all of its links.
 - Creators (and, from Phase 4, room owners) can list and revoke active links.
+- **Phase 2 as built:** `end_share` (deletion, expiry, upload failure, takedown) revokes every link of the share and clears its codes in the same transaction; every viewer request re-checks the link and the share, so this takes effect on the next request (tested, T-031).
 
 ### 4.9 Enumeration and probing defenses
 
@@ -526,6 +538,8 @@ returning id, claim_grace_until;
 
 Detection uses extension **and** magic bytes: PE/MZ, ELF, Mach-O, MSI/OLE, APK/JAR (ZIP with a manifest), `.bat .cmd .ps1 .vbs .js .jse .wsf .hta .scr .lnk .reg .sh .command`, `.iso .img .dmg`.
 
+**Phase 2 as built (`lib/server/security/file-policy.ts`; Q-010 answered by the owner on 2026-10-16: block for anonymous/Free remote sharing, archives allowed with a warning, local sharing unchanged):** Free (every user) blocks `executable`, `script` and `disk_image` flags in remote links (`422 REMOTE_FILE_BLOCKED` at link creation, and again before any viewer URL); link-only shares refuse them by name at upload start and by content at completion. Archives pass with the `archive` flag, and the share page asks before downloading them. Content detection gained APK/JAR (a ZIP whose first entry is the manifest) and the installer extensions `pkg`, `mpkg`, `appimage`, `xapk` (DV2-18). MSI/OLE content is not sniffed (it would also flag old Office documents); `.msi` is caught by extension. Local shares are unchanged.
+
 ### 7.5 Malware scanning (Phase 6)
 
 - Asynchronous scanning (for example ClamAV in a container on a small VPS or Cloudflare Containers) for files up to a size limit. Records `scan_status`.
@@ -536,6 +550,7 @@ Detection uses extension **and** magic bytes: PE/MZ, ELF, Mach-O, MSI/OLE, APK/J
 - Report button on share pages, local feed items and room items → `POST /api/v1/reports` (Turnstile) → `app.abuse_reports` → operator notification.
 - Operator actions: block the share or link (`status = 'blocked'`, links revoked, objects deleted or quarantined as legal advice requires), block a whole network space (`network_spaces.status = 'blocked'`), audit, reporter follow-up.
 - **Legal obligations vary by jurisdiction.** For example, US providers must report apparent child sexual abuse material to NCMEC once aware (18 U.S.C. § 2258A). The EU Digital Services Act imposes notice-and-action duties. **Legal review is required before public launch** (RISK-005, Q-022). Hash-matching tools are evaluated in Phase 6.
+- **Phase 2 as built:** `POST /api/v1/reports` (a device that can see the share, or a link viewer holding the link's grant; Turnstile where configured; 10 an hour per network key and per reporter); each report is stored, audited (`report.created`) and logged as the warn event `abuse.report_received`. **Nothing notifies a person:** Phase 2 has no email, chat, SMS or pager alert (owner decision 2026-10-16); the alert, its channel and the named operator are future operational requirements (Q-022, DV2-11). Takedown is `app.admin_block_share` / `app.admin_block_link`, run from the dashboard per the [takedown runbook](runbooks/takedown.md). **Not built:** quarantine or evidence preservation; blocked files are queued for deletion like any ended share (RISK-031).
 
 ### 7.7 Deleting objects while upload URLs are live (Phase 1 as built)
 
@@ -585,6 +600,8 @@ Legend: ✅ allowed · ⚙️ allowed if a setting or entitlement permits · ❌
 | Report content | ✅ | ❌ | — | ✅ | — |
 | Block a share, link or network space | ❌ | ❌ | ❌ | ❌ | ✅ |
 
+**Phase 2 as built:** the link-viewer column holds, and is tested route by route in `tests/integration/authz-matrix.test.ts` with two viewer actors (this share's link, another share's link). A link viewer reports a share through its link; creating, listing, revoking and re-coding links are creator-only (403 `NOT_CREATOR` on the share's network, 404 elsewhere). Blocking is SQL-only (no operator endpoint before Phase 4).
+
 **Rooms (Phase 4–5):**
 
 | Action | Non-member | Private-room member | Room owner | Share creator | Link viewer | Workspace admin (Phase 5) | Operator |
@@ -623,6 +640,8 @@ Initial values are proposals; tune them from production data. Implemented as `ap
 | Password attempt (Phase 4) | link, network key | 10 fails/15 min/link, then 15 min lock + Turnstile · 20 fails/h/network key | 423 / 429 |
 | Invite accept (Phase 4) | invite, network key | 10/10 min per invite · 30/h per network key | 429 |
 | Abuse report | network key | 10/h + Turnstile | 429 |
+
+**Phase 2 as built (`lib/server/ratelimit/limits.ts`):** create link 30/h per user; list links 60/min per device; revoke 60/min per user; new code 30/h per user; unlock 30/10 min per link and 60/10 min per network key; viewer content 60/min per link session; viewer URLs 120/min per link session plus 500/day per link (downloads and previews together, DV2-15; from the link's entitlement snapshot); codes as in §4.4; reports 10/h per network key and 10/h per reporter. Network keys for these limits are derived per request (`lib/server/network/requester.ts`), never stored with a session. Kill switches `remote_links_enabled` and `short_codes_enabled` are in the table and answer `503`. **Accepted by the owner as implemented (Q-027, 2026-10-16):** no limit is loosened or added. Two consequences to know: the per-link unlock limit counts every attempt, so at most 30 new browsers can open one link in 10 minutes (RISK-033); and only failed code attempts are counted, so successful resolutions are limited only by Cloudflare's per-IP rule (RISK-032).
 
 **Phase 1 as built:** `lib/server/ratelimit/limits.ts` implements register device (10/h per user), rename (20/h), observe (30/min per device), local feed and My uploads (60/min per device), share detail (120/min per device), create share (30/h per user plus daily volume 2 GB per user and 10 GB per network space, counted in KiB), complete (120/min per user), text create/edit (60/min per user, 300/min per space), delete (60/min per user) and download/preview URLs (120/min per device). Every 429 carries `Retry-After`.: `uploads_enabled`, `anonymous_uploads_enabled`, `local_sharing_enabled`, `remote_links_enabled`, `short_codes_enabled`. Also per-network blocks (`network_spaces.status = 'blocked'`) and per-user suspension (`app.user_flags`).
 
@@ -677,9 +696,9 @@ Notes:
 | `DATABASE_URL` (least-privilege app role) | Server | Host env | 90 days | Application data |
 | R2 access keys: **web** token (object read/write, one bucket), **janitor** token (separate) | Server; janitor | Env | 90 days | Bucket objects |
 | `NETWORK_KEY_SECRET` (current + previous) | Server | Env | Yearly or on incident, with a 100-day overlap (§3.2) | De-anonymization of network keys (IPv4 keys can be brute-forced with the secret). It does **not** by itself grant access to local content, which also needs a request from that network. |
-| `LINK_PEPPER`, `CODE_PEPPER`, `INVITE_PEPPER` (versioned) | Server | Env | Rarely (version column allows it) | Offline verification of leaked hashes |
+| `LINK_PEPPER`, `CODE_PEPPER`, `INVITE_PEPPER` (versioned) | Server: `LINK_PEPPER` and `CODE_PEPPER` since Phase 2 (link secrets, short codes; ≥ 32 characters, different from each other, required when deployed); `INVITE_PEPPER` from Phase 4 | Env (`PEPPER_VERSION`, `*_PREVIOUS` during a rotation) | Rarely (version column allows it) | Offline verification of leaked hashes |
 | `ORIGIN_SHARED_SECRET` (2 accepted during rotation) | Cloudflare Transform Rule and `proxy.ts` | Cloudflare and env | 90 days | Origin-lock bypass → IP spoofing |
-| Turnstile secret key | Supabase Auth, which verifies the Turnstile token at anonymous sign-in. **Not used by the app**: there is no `TURNSTILE_SECRET_KEY` variable (phase 1 DV1-9). | The Supabase project's Auth captcha settings | Yearly / incident | Bot protection bypass |
+| Turnstile secret key | Supabase Auth, which verifies the Turnstile token at anonymous sign-in; **since Phase 2 also the server** (`TURNSTILE_SECRET_KEY`: code-guessing escalation and reports, required when deployed, DV2-6) | The Supabase project's Auth captcha settings and the host env | Yearly / incident | Bot protection bypass |
 | `JANITOR_TRIGGER_SECRET` | pg_cron (Vault) → Edge Function | Supabase Vault and function secrets | 90 days | Janitor triggering (it only deletes outbox entries) |
 | Billing API key / webhook secret (Phase 4) | Server | Env | Per provider guidance | Billing tampering |
 | `NEXT_SERVER_ACTIONS_ENCRYPTION_KEY` (only if multi-instance) | Next.js | Env | On deploy policy | Action closure decryption |
@@ -710,7 +729,12 @@ Rules:
 | Audit events | Security events ≥ 90 days. Team: per workspace policy. | — |
 | Anonymous users | Deleted after 30 days of inactivity | Cascades devices and presence |
 | Realtime messages | Supabase keeps broadcast-from-DB messages ≥ 72 h and ≤ 4 days | Hence ID-only payloads |
-| Abuse reports and evidence | Per legal advice | — |
+| Link viewer sessions (Phase 2) | Cookie 12 h from the last unlock or code; the stored SHA-256 is deleted 24 h after expiry by `purge-ephemeral` | No viewer identity, network key or IP is stored with a session (DV2-10) |
+| Link grants (Phase 2) | ≤ 12 h; deleted after expiry by `purge-ephemeral` | — |
+| Link and code hashes (Phase 2) | Link rows stay with their share until the Phase 3 tombstone purge; code HMACs are cleared once the code expires | Secrets and codes are never stored in clear |
+| Downloads by link viewers (Phase 2) | As the download log (30 days, purge in Phase 3), with the link ID and browser family only | — |
+| Abuse reports and evidence | Per legal advice. As built (Phase 2): category, details, optional email, reporter kind, the reporting anonymous user for devices; kept until reviewed, no retention job (Q-022). No evidence preservation (RISK-031). | — |
+| Rate counters keyed by network key (Phase 2) | Until their window ends; a code block 24 h | Keyed hashes, not addresses |
 
 GDPR and similar laws: hashed identifiers are still personal data. Before public launch you need:
 
@@ -730,6 +754,7 @@ Keep app and share pages free of third-party trackers. If analytics are needed, 
   - Shares: `share.created{scope}`/`deleted`/`claimed`/`blocked`.
   - Links and downloads: `link.created`/`revoked`, `link.unlock_failed` (aggregated), `link.password_failed`, `code.resolve_failed` (aggregated), `download.url_issued`.
   - Operations: `report.created`, `admin.block`.
+- **Phase 2 as built:** audit events `link.created`, `link.revoked`, `link.code_created`, `report.created` (actor `device` or `link_viewer`), `code.resolve_failed` and `code.resolve_blocked` (at the challenge and block thresholds, without network data), `admin.block` (actor `operator`, with the operator's name and reason), and `share.ended` with reason `blocked`. Unlock failures are aggregated by the rate limiter (log `link.unlock_rate_limited`); download URLs are recorded in `downloads`, not as audit events. Log events that future alerts will watch (Phase 2 delivers none, Q-022): `abuse.report_received`, `code.resolve_failures`, `code.resolve_blocked`, `code.resolve_failure_spike`, `link.unlock_rate_limited`.
 - **Redaction:** cookies, `authorization`, `x-origin-auth`, `secret`, `code`, `password`, probe nonces, URL fragments and `X-Amz-Signature` query values are removed before logging and before sending errors to monitoring.
 - **Alerts:**
   - Spikes in code or password failures.

@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Document status | PROPOSED |
-| Last updated | 2026-10-15 (Phase 1 suites implemented: §3 as built, §4.11 test map incl. the security review and second-pass tests; RustFS instead of MinIO; §8 points to the Phase 1 manual procedure) |
+| Last updated | 2026-10-16 (§4.12: report copy makes no review promise, owner decision on abuse notification). 2026-10-15 (Phase 2 suites implemented: §4.12 test map, §5 matrix actors as built, §8 Phase 2 manual procedure). Earlier the same day: Phase 1 suites, §3 as built, §4.11 test map; RustFS instead of MinIO |
 | Applies to | All phases. Each phase document lists which tests from this catalogue it must deliver. |
 
 ---
@@ -204,6 +204,28 @@ IDs are stable. Phase documents reference them.
 | Cache removal on network change (T-003, RISK-027), API client, uploader store, status copy, share card | `tests/unit/client-*.test.ts`, `tests/component/local-ui.test.tsx` |
 | T-009 | Not applicable until SP-04 adopts the dual-stack probe |
 
+### 4.12 Phase 2 test map (as built, 2026-10-15)
+
+| Tests | Where |
+|---|---|
+| T-011 (links: creator only, 403 for others on the network, 404 elsewhere) | `tests/integration/remote-links.test.ts`, `authz-matrix.test.ts` |
+| T-012 (link-only never in a feed or `net:` topic) | `remote-links.test.ts`, `realtime.test.ts`, `supabase/tests/phase2_remote_sharing.test.sql`, `tests/e2e/local-remote-sharing.spec.ts` |
+| T-029 (viewer sees only the target; this share vs another share) | `remote-links.test.ts`, the IDOR matrix (`linkViewer`, `otherLinkViewer`), E2E |
+| T-030 (identical 404 for wrong secret, unknown and malformed link; comparable timing; 410 only after proof) | `remote-links.test.ts` |
+| T-031 (revoked, expired, ended share, expired grant) | `remote-links.test.ts`, E2E |
+| T-032 (codes: normalization, expiry, replacement, limits, Turnstile escalation, 24-hour block, secret never returned) | `tests/unit/short-code.test.ts`, `link-secrets.test.ts`, `tests/integration/short-codes.test.ts`, `tests/component/remote-ui.test.tsx`, E2E |
+| T-033 (unfurlers) | `tests/integration/remote-hygiene.test.ts`, E2E |
+| T-035 (executables refused for links; archives with a warning) | `tests/unit/file-policy.test.ts`, `sniff.test.ts`, `remote-links.test.ts`, E2E (archive warning) |
+| T-036 (report → takedown → access gone, objects queued, audit) | `tests/integration/abuse.test.ts`, pgTAP, E2E |
+| T-047 (share and code pages: `no-store`, `noindex`, `no-referrer`) | `remote-hygiene.test.ts`, `tests/unit/security-headers.test.ts`, E2E |
+| T-049 (link-related 429s: unlock, daily URL cap, code block, reports) | `remote-links.test.ts`, `short-codes.test.ts`, `abuse.test.ts` |
+| Secrets and codes never in database statements or server logs | `remote-hygiene.test.ts` (full statement logging, server log file) |
+| Session fixation, cookie attributes | `remote-links.test.ts`, `tests/unit/link-cookies.test.ts` |
+| QR content | `tests/component/share-qr.test.tsx` (decodes the rendered SVG), E2E (decodes the creator's QR and opens it) |
+| Kill switches `remote_links_enabled`, `short_codes_enabled` | `remote-links.test.ts`, `short-codes.test.ts` |
+| Report copy promises no review, since no alert reaches a person (owner decision 2026-10-16) | `tests/component/remote-ui.test.tsx` (report dialog and report page) |
+| Real phone cameras and keyboards, takedown rehearsal, real Turnstile and R2 | Manual: [phase 2 procedure](phases/phase-2-manual-verification.md) (not run) |
+
 ---
 
 ## 5. IDOR matrix as code
@@ -219,6 +241,7 @@ IDs are stable. Phase documents reference them.
   - (Phase 4) private-room member, owner, removed member, non-member
   - (Phase 5) member and admin of another workspace
 - A test enumerates `app/api/v1/**/route.ts` and **fails if a route or method has no matrix entry**. New endpoints cannot ship without authorization tests.
+- **As built (Phase 2, 2026-10-15):** `tests/integration/authz-matrix.test.ts` covers all 24 handlers with nine actors: anonymous, same network, other network, left the network, blocked network (standing for every non-`ok` status), viewer of this share's link, viewer of another share's link, creator on the share's network, creator's second device elsewhere. Viewer actors send only the link-session cookie.
 - The matrix mirrors [03 §9](03-security-and-network-design.md#9-authorization-matrix). Changing one requires changing the other.
 
 ---
@@ -250,7 +273,7 @@ Coverage is a signal, not a goal. **Requirement:** 100% of authorization matrix 
 
 ## 8. Manual device and network matrix (Phases 1–3 verification)
 
-Phase 1's executable procedure, with steps, expected results and the recording sheet, is [phases/phase-1-manual-verification.md](phases/phase-1-manual-verification.md). Real-device tests need staging behind Cloudflare: a phone on the developer's Wi-Fi presents a private address and local sharing is `unavailable`.
+Phase 1's executable procedure, with steps, expected results and the recording sheet, is [phases/phase-1-manual-verification.md](phases/phase-1-manual-verification.md); Phase 2's (scenarios 6 and 7: QR scans and codes on phones, plus the takedown rehearsal) is [phases/phase-2-manual-verification.md](phases/phase-2-manual-verification.md). Real-device tests need staging behind Cloudflare: a phone on the developer's Wi-Fi presents a private address and local sharing is `unavailable`.
 
 | Devices / browsers | Networks |
 |---|---|

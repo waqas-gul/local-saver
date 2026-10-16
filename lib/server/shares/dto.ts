@@ -21,7 +21,7 @@ export async function loadShareDtos(db: Db, shareIds: string[], viewerUserId: st
       .selectFrom("app.shares as s")
       .leftJoin("app.devices as d", "d.id", "s.created_by_device_id")
       .select([
-        "s.id", "s.kind", "s.status", "s.created_at", "s.expires_at", "s.created_by_user_id",
+        "s.id", "s.kind", "s.scope", "s.status", "s.created_at", "s.expires_at", "s.created_by_user_id",
         "s.file_count", "s.total_bytes", "d.label as from_label",
       ])
       .where("s.id", "in", shareIds)
@@ -59,6 +59,7 @@ export async function loadShareDtos(db: Db, shareIds: string[], viewerUserId: st
     result.set(share.id, {
       id: share.id,
       kind: share.kind as ShareDto["kind"],
+      scope: share.scope as ShareDto["scope"],
       status: share.status as ShareDto["status"],
       createdAt: share.created_at.toISOString(),
       expiresAt: (share.expires_at as Date).toISOString(),

@@ -20,8 +20,8 @@ export const NOTICE = {
   confirm: "Got it",
 };
 
-/** Phase 1 has no fallback yet (links, QR codes and share codes arrive in Phase 2). */
-const NO_FALLBACK_YET = "Sharing by link isn't available yet.";
+/** The fallback where local mode is off (Phase 2): link-only posts, shared by link, QR code or code. */
+const FALLBACK = "You can still share by link, QR code or share code: post as Link only below.";
 
 export function statusCopy(status: NetworkStatus, reason: string | null): { title: string; body: string } | null {
   switch (status) {
@@ -31,20 +31,20 @@ export function statusCopy(status: NetworkStatus, reason: string | null): { titl
     case "too_large":
       return {
         title: "Local sharing is off on this network",
-        body: `It looks like a mobile, VPN, relay or very large shared network, where other people may share your internet address. ${NO_FALLBACK_YET}`,
+        body: `It looks like a mobile, VPN, relay or very large shared network, where other people may share your internet address. ${FALLBACK}`,
       };
     case "blocked":
-      return { title: "Local sharing is off on this network", body: "Local sharing has been turned off for this network." };
+      return { title: "Local sharing is off on this network", body: `Local sharing has been turned off for this network. ${FALLBACK}` };
     case "unavailable":
       if (reason === "disabled") {
-        return { title: "Local sharing is paused", body: "Local sharing is paused right now. Please try again later." };
+        return { title: "Local sharing is paused", body: `Local sharing is paused right now. ${FALLBACK}` };
       }
       if (reason === "classification_unavailable") {
-        return { title: "Local sharing is paused", body: "Local sharing is paused while our network checks are being updated." };
+        return { title: "Local sharing is paused", body: `Local sharing is paused while our network checks are being updated. ${FALLBACK}` };
       }
       return {
         title: "Local sharing is off",
-        body: `We can't tell which network you're on right now, so local sharing is off. ${NO_FALLBACK_YET}`,
+        body: `We can't tell which network you're on right now, so local sharing is off. ${FALLBACK}`,
       };
   }
 }

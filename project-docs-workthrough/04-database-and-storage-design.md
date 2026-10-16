@@ -2,8 +2,8 @@
 
 | Field | Value |
 |---|---|
-| Document status | PROPOSED. Phase 0 and Phase 1 migrations are implemented (§12); later phases' column-level detail is indicative and finalized in each phase's migration review. |
-| Last updated | 2026-10-15 (§12: Phase 1 migration implemented; second review pass: §7.2 upload URL expiry, §9.2 storage executor and tombstones, §11 functions, §12 as-built list). Earlier: 2026-09-29 (baseline executed locally); 2026-09-23 (CR-001) |
+| Document status | PROPOSED. Phase 0, 1 and 2 migrations are implemented (§12); later phases' column-level detail is indicative and finalized in each phase's migration review. |
+| Last updated | 2026-10-15 (§12: Phase 2 migration implemented, with its differences from §7.4–§7.6 and §10.4). Earlier the same day: Phase 1 migration implemented (§7.2 upload URL expiry, §9.2 storage executor and tombstones, §11 functions, §12 as-built list). 2026-09-29 (baseline executed locally); 2026-09-23 (CR-001) |
 | Key decisions | DEC-006, DEC-007, DEC-009, DEC-010, DEC-012, DEC-016, DEC-017, DEC-019, DEC-026, DEC-027, DEC-031, DEC-032 |
 
 ---
@@ -698,13 +698,22 @@ returning bytes_committed, bytes_reserved;
   - `shares.scope` allows only `network`.
   - Tables that reference `auth.users` are created by the migration role and handed to `app_owner`; Realtime trigger functions are `SECURITY DEFINER` and owned by the migration role; execute on `app` functions is revoked from `PUBLIC` globally (phase 1 F1-1 … F1-3).
   - The Supabase CLI (2.117) splits a migration wrongly at `case … end then` inside a PL/pgSQL `if`; such conditions are written without `case` (phase 1 F1-16).
+- **Phase 2 (implemented 2026-10-15):** `supabase/migrations/20261015180000_phase2_remote_sharing.sql`, tested by `supabase/tests/phase2_remote_sharing.test.sql` (55 assertions; one Phase 1 assertion about `link_only` was replaced by an equally strict one, phase 2 DV2-17). Applied only to local databases (also from scratch with `supabase db reset`). As built, compared with §7.4–§7.6 and §10.4:
+  - `shares.scope` allows `network` and `link_only`; `shares_network_scope` keeps a space for network shares only.
+  - `share_links`: `share_id` NOT NULL and `target_type` `share` only (Phase 4 widens both); added `created_by_device_id`, `revoke_reason` (`creator`, `share_ended`, `blocked`) and `short_code_pepper_version`; no `password_*` columns yet. Checks: 16-character IDs, 32-byte HMACs, code fields all-or-none, revocation fields together, `expires_at > created_at`; trigger `share_links_check_expiry` refuses a link outliving its share. Unique partial index on live code HMACs.
+  - `link_sessions` without `network_key` (rate limits derive it per request); `link_grants` adds `granted_via` (`secret`, `code`) and a check that a grant lasts at most 12 hours.
+  - `abuse_reports` without `reporter_network_key` and `evidence_retained_until`; adds `reporter_kind`. Created by the migration role, because `app_owner` has no `USAGE` on the `extensions` schema that holds `citext` (phase 2 F2-1).
+  - `downloads.actor_kind` and `audit_events.actor_kind` accept `link_viewer`; `downloads.link_id` (set null with the link).
+  - `end_share` also revokes the share's links and clears their codes; `purge_ephemeral` also deletes expired grants, sessions 24 h after expiry, and clears expired codes.
+  - `admin_block_share`, `admin_block_link`: audited takedowns that resolve open reports; executable by no role (only the database owner).
+  - Runtime flags `remote_links_enabled`, `short_codes_enabled`.
 
 
 | Phase | Migrations |
 |---|---|
 | 0 | `app` and `app_realtime` schemas, roles and grants, extensions (`citext`, `pg_cron`, `pg_net`), `runtime_flags`, `rate_counters`, `rate_limit_hit()` |
 | 1 | `devices`, `network_spaces`, `network_presence`, `network_egress_ranges`, (`network_probe_nonces`, `network_bindings`, `network_key_links` if SP-04 adopts the dual-stack probe; `network_egress_asns` if ASN forwarding works), `shares` (scope `network`), `files`, `text_items`, `downloads`, `storage_usage`, `storage_reservations`, `object_deletions`, `audit_events`, `idempotency_keys`, `user_flags`, triggers, realtime policies (`net`, `user` topics), Phase 1 jobs |
-| 2 | `share_links`, `link_sessions`, `link_grants`, `abuse_reports`, share scope `link_only`, link-related job clauses |
+| 2 ✅ | `share_links`, `link_sessions`, `link_grants`, `abuse_reports`, share scope `link_only`, link-related job clauses, takedown functions |
 | 3 | Burn claim columns/functions, janitor trigger job, tombstone and anonymous-user cleanup, reconciliation jobs |
 | 4 | `rooms`, `room_members`, `room_invites`, `shares.room_id` and scope `room`, the `room` realtime topic, `profiles`, `subscriptions`, `billing_customers`, `billing_events`, `entitlement_overrides`, multipart columns, password columns, room-link support |
 | 5 | `workspaces`, `workspace_members`, `workspace_invitations`, workspace columns and policies |

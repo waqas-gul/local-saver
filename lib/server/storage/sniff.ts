@@ -56,6 +56,17 @@ const ARCHIVES: { mime: string; test: (d: Uint8Array) => boolean }[] = [
   { mime: "application/vnd.rar", test: (d) => hasText(d, "Rar!\x1a\x07") },
 ];
 
+/**
+ * Java and Android packages are ZIP files whose first entry is their manifest (03 §7.4: APK/JAR).
+ * The first local file header names it at offset 30.
+ */
+function zipFirstEntryIsManifest(d: Uint8Array): boolean {
+  if (!hasBytes(d, [0x50, 0x4b, 0x03, 0x04]) || d.length < 30) return false;
+  const nameLength = (d[26] ?? 0) | ((d[27] ?? 0) << 8);
+  const name = Buffer.from(d.subarray(30, 30 + nameLength)).toString("latin1");
+  return name.startsWith("META-INF/") || name === "AndroidManifest.xml";
+}
+
 export function sniff(data: Uint8Array): SniffResult {
   const result: SniffResult = { mime: null, rasterImage: false, executable: false, script: false, archive: false };
 
@@ -64,6 +75,8 @@ export function sniff(data: Uint8Array): SniffResult {
 
   const executable = EXECUTABLES.find((e) => e.test(data));
   if (executable) return { ...result, mime: executable.mime, executable: true };
+
+  if (zipFirstEntryIsManifest(data)) return { ...result, mime: "application/java-archive", executable: true, archive: true };
 
   const archive = ARCHIVES.find((a) => a.test(data));
   if (archive) return { ...result, mime: archive.mime, archive: true };

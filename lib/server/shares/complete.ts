@@ -6,7 +6,9 @@ import { getDb } from "../db/client";
 import type { Env } from "../env";
 import { ApiError, notFound } from "../http/errors";
 import type { NetworkView } from "../network/current";
+import type { Entitlements } from "../entitlements/plans";
 import { enforceRateLimit } from "../ratelimit/limits";
+import { remoteFilePolicy } from "../security/file-policy";
 import { riskFlags } from "../security/file-risk";
 import { isPreviewType } from "../storage/keys";
 import { headObject, readObjectHead } from "../storage/s3";
@@ -89,6 +91,11 @@ export async function completeFile(
 
   const sniffed = sniff(await readObjectHead(env, file.object_key, SNIFF_BYTES));
   const flags = riskFlags({ name: file.original_name, extension: file.extension }, sniffed);
+  // A link-only share must stay shareable by link: content that a link may not carry (an
+  // executable under a harmless name, for example) fails the upload (T-035).
+  if (share.scope === "link_only" && !remoteFilePolicy(flags, share.entitlementSnapshot as Partial<Entitlements>).allowed) {
+    await rejectUpload(env, share.id, file.id, "remote_file_blocked");
+  }
   // Previews only when the stored type is a raster image and the bytes really are one (03 §6).
   const previewable = sniffed.rasterImage && isPreviewType(file.stored_content_type);
 

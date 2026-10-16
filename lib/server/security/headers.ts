@@ -99,6 +99,7 @@ export function securityHeaders(pathname: string, options: { https: boolean }): 
   };
   if (options.https) headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains";
   if (NOINDEX_ROUTES.test(pathname)) headers["X-Robots-Tag"] = "noindex, nofollow";
-  if (isApiPath(pathname)) headers["Cache-Control"] = "no-store";
+  // API responses, and share, invite and code pages: never stored by a browser or a proxy (T-047).
+  if (isApiPath(pathname) || NO_REFERRER_ROUTES.test(pathname)) headers["Cache-Control"] = "no-store";
   return headers;
 }

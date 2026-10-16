@@ -54,7 +54,22 @@ describe("isShareVisible (03 §3.6, G1)", () => {
     expect(isShareVisible(pending, { ...onA, userId: CREATOR })).toBe(true);
   });
 
-  it("ignores shares that are not network-scoped", () => {
+  it("never shows a link-only share on a network, even its own space's (DEC-033, T-012)", () => {
+    const linkOnly = { ...share, scope: "link_only", networkSpaceId: null };
+    expect(isShareVisible(linkOnly, onA)).toBe(false);
+    // Even if a link-only row ever carried a space ID, the network part of the rule never applies.
     expect(isShareVisible({ ...share, scope: "link_only" }, onA)).toBe(false);
+  });
+
+  it("shows a link-only share to its creator, from any network (My uploads)", () => {
+    const linkOnly = { ...share, scope: "link_only", networkSpaceId: null };
+    expect(isShareVisible(linkOnly, { userId: CREATOR, eligibleSpaceIds: [], now: NOW })).toBe(true);
+    expect(isShareVisible({ ...linkOnly, status: "pending_upload" }, { userId: CREATOR, eligibleSpaceIds: [], now: NOW })).toBe(true);
+    expect(isShareVisible({ ...linkOnly, expiresAt: NOW }, { userId: CREATOR, eligibleSpaceIds: [], now: NOW })).toBe(false);
+  });
+
+  it("ignores scopes it doesn't know (room shares arrive in Phase 4)", () => {
+    expect(isShareVisible({ ...share, scope: "room" }, onA)).toBe(false);
+    expect(isShareVisible({ ...share, scope: "room" }, { ...onA, userId: CREATOR })).toBe(false);
   });
 });

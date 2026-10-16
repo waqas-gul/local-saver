@@ -112,10 +112,22 @@ export class Device {
     return this.observe();
   }
 
-  async postText(content = `note ${randomBytes(4).toString("hex")}`, expiresIn?: number) {
-    const response = await this.call("POST", "/api/v1/texts", { destination: "network", content, ...(expiresIn ? { expiresIn } : {}) });
+  async postText(
+    content = `note ${randomBytes(4).toString("hex")}`,
+    expiresIn?: number,
+    destination: "network" | "link_only" = "network",
+  ) {
+    const response = await this.call("POST", "/api/v1/texts", { destination, content, ...(expiresIn ? { expiresIn } : {}) });
     if (response.status !== 201) throw new Error(`text post failed: ${response.status} ${response.text}`);
-    return response.body.share as { id: string; text: { content: string; version: number } };
+    return response.body.share as { id: string; scope: string; text: { content: string; version: number } };
+  }
+
+  /** A share link (creator only). Returns the link with its one-time URL and optional code. */
+  async createLink(shareId: string, body: { expiresIn?: number; shortCode?: { expiresIn?: number } } = {}) {
+    const response = await this.call("POST", `/api/v1/shares/${shareId}/links`, body);
+    if (response.status !== 201) throw new Error(`link creation failed: ${response.status} ${response.text}`);
+    const link = response.body.link as LinkCreated;
+    return { ...link, secret: new URL(link.url).hash.replace(/^#k=/, "") };
   }
 
   async feedIds(): Promise<string[]> {
@@ -131,9 +143,15 @@ export class Device {
   }
 
   /** Init → PUT to storage → complete. Returns the completed share. */
-  async uploadFile(name: string, bytes: Uint8Array, type = "application/octet-stream", declaredSize = bytes.length) {
+  async uploadFile(
+    name: string,
+    bytes: Uint8Array,
+    type = "application/octet-stream",
+    declaredSize = bytes.length,
+    destination: "network" | "link_only" = "network",
+  ) {
     const init = await this.call("POST", "/api/v1/shares", {
-      destination: "network",
+      destination,
       files: [{ name, size: declaredSize, type }],
     });
     if (init.status !== 201) throw new Error(`upload init failed: ${init.status} ${init.text}`);
@@ -144,6 +162,52 @@ export class Device {
     return { init, upload, complete };
   }
 }
+
+export type LinkCreated = {
+  id: string;
+  url: string;
+  createdAt: string;
+  expiresAt: string;
+  shortCode: { code: string; expiresAt: string } | null;
+};
+
+/**
+ * A link viewer (Phase 2): a browser with no Supabase session, only the link-session cookie
+ * the server sets. Its cookie jar holds exactly that cookie.
+ */
+export class Viewer {
+  cookie: string | null = null;
+
+  constructor(public ip: string | null = newNetwork().ip()) {}
+
+  async call<T = Json>(method: string, path: string, body?: unknown, extra: Omit<ApiOptions, "ip" | "body"> = {}) {
+    const headers: Record<string, string> = { ...extra.headers };
+    if (this.cookie) headers.cookie = this.cookie;
+    const response = await api<T>(method, path, { ...extra, headers, ip: this.ip, body });
+    const set = response.headers.get("set-cookie");
+    if (set) this.cookie = set.split(";")[0] ?? null;
+    return response;
+  }
+
+  unlock(linkId: string, secret: string) {
+    return this.call("POST", `/api/v1/links/${linkId}/unlock`, { secret });
+  }
+
+  content(linkId: string) {
+    return this.call("GET", `/api/v1/links/${linkId}/content`);
+  }
+
+  fileUrl(linkId: string, fileId: string, kind: "download-url" | "preview-url" = "download-url") {
+    return this.call("POST", `/api/v1/links/${linkId}/files/${fileId}/${kind}`, {});
+  }
+
+  resolve(code: string, turnstileToken?: string) {
+    return this.call("POST", "/api/v1/codes/resolve", { code, ...(turnstileToken ? { turnstileToken } : {}) });
+  }
+}
+
+/** A Turnstile token the integration server's siteverify stand-in accepts once. */
+export const turnstilePass = () => `pass-${randomBytes(8).toString("hex")}`;
 
 let pool: pg.Pool | undefined;
 

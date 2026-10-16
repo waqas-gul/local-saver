@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Document status | PROPOSED — numeric limits are proposals pending Q-006, Q-007, Q-008, Q-009, Q-015, Q-017 |
-| Last updated | 2026-10-15 (Phase 1 enforces the Free rows; values still pending Q-007 and Q-030) |
+| Last updated | 2026-10-16 (owner decisions for Phase 2: Q-010 and Q-027 answered, Q-011 answered for Phase 2, link lifetime = share expiry; §8 note). 2026-10-15 (Phase 2 enforces the Free link rows; Phase 1 the upload rows; values still pending Q-007, Q-027 and Q-030) |
 | Key decisions | DEC-018, DEC-019, DEC-023, DEC-024 |
 
 ---
@@ -13,6 +13,8 @@
 Values in *italics* are proposals that need owner confirmation.
 
 **Phase 1 (2026-10-15):** the Free column is enforced on the server from `lib/shared/plans.ts` (`lib/server/entitlements/plans.ts` resolves it; the UI uses the same numbers as hints): 100 MB per file, 20 files per share, 100 KB text, 2 GB active storage per user (reservation ledger), 2 GB/day per user and 10 GB/day per network (counted per network space), local expiry 1 h / 24 h / 7 days with 24 h default. The italic values are **assumed** until the owner answers Q-007 and Q-030; each is a one-line change.
+
+**Phase 2 (2026-10-15):** also enforced for Free from the same files: links for every user ("Link only" posting, share links, QR codes, short codes); short codes 10 minutes, 1 hour (default) or 24 hours; link expiry until the share expires (default) or 1 h / 24 h / 7 days, never past the share (DV2-13; **accepted by the owner on 2026-10-16**: the share's expiry is a link's maximum lifetime, in place of the "7 days default" above); **500 download and preview URL issuances per link per day** (both count, DV2-15; Q-027 answered 2026-10-16: kept as implemented, all Phase 2 limits in [phase 2 §19.2](phases/phase-2-remote-sharing.md#192-accepted-limits-as-implemented-q-027)), read from the link's entitlement snapshot; executables, scripts, installers and disk images blocked in remote links (`executablesInRemoteLinks: false`; Q-010 answered 2026-10-16: blocked, archives allowed with a warning, local sharing unchanged). No advertising anywhere (Q-011, answered for Phase 2). The error contract below gained `422 REMOTE_FILE_BLOCKED` and `429 LINK_DAILY_LIMIT`.
 
 | Capability | FREE (anonymous, or signed in without subscription) | PRO | TEAM |
 |---|---|---|---|
@@ -279,3 +281,5 @@ The brief implies ads on Free ("No ads" is a Pro feature). Recommendation (DEC-0
 - **No third-party ad or analytics scripts** on pages that display user content or secrets (rooms, shares, invites, codes). They can read shared text, file names and presigned URLs, and ad-network policies commonly exclude file-hosting user content.
 - If advertising revenue matters, restrict it to marketing pages or first-party promotions (for example "Upgrade to Pro for 5 GB files").
 - Pro's value proposition should be capacity, retention, passwords, privacy and history, not the absence of ads.
+
+**Owner decision (2026-10-16, Q-011):** advertising stays out of Phase 2. Remote sharing is ad-free, and no ad system is built. Whether Free gets ads after Phase 2 is not decided.

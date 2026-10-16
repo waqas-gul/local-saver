@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Document status | PROPOSED — hosting choice is CONDITIONAL on SP-01 (DEC-022) |
-| Last updated | 2026-10-15 (Phase 1: local stack with RustFS, configuration inventory, CI stack job, Turnstile secret in Supabase; security review: Pseudo IPv4, query-parameter logging, egress-list loading and alert, `if-none-match` in CORS, egress runbook; second review pass: no client address in database parameters, `auto_explain`, Supabase Auth IP storage, access logs, WebKit in CI, manual verification procedure). Earlier: 2026-09-29; 2026-09-23. |
+| Last updated | 2026-10-16 (Phase 2 owner decisions: no abuse alert is delivered in Phase 2, §8). 2026-10-15 (Phase 2: peppers and the Turnstile secret in the configuration inventory, Phase 2 alert events, takedown and kill-switch runbooks). Earlier the same day: (Phase 1: local stack with RustFS, configuration inventory, CI stack job, Turnstile secret in Supabase; security review: Pseudo IPv4, query-parameter logging, egress-list loading and alert, `if-none-match` in CORS, egress runbook; second review pass: no client address in database parameters, `auto_explain`, Supabase Auth IP storage, access logs, WebKit in CI, manual verification procedure). Earlier: 2026-09-29; 2026-09-23. |
 | Key decisions | DEC-004, DEC-017, DEC-022, DEC-028, DEC-029, DEC-030 |
 
 ---
@@ -186,7 +186,9 @@ Every command of both jobs passes locally (2026-10-15). The GitHub remote exists
 | Network `unavailable` rate | Logs | > 5% of observations (proxy misconfiguration) |
 | Network status flips | `network.status_changed` audit events | Spike in spaces becoming `shared_egress` or `too_large` (classification drift or abuse) |
 | Egress lists stale | `network.egress_list_stale` error log (local sharing is off everywhere) | Any; reload per the [runbook](runbooks/egress-lists.md) |
-| Abuse reports | `abuse_reports` | Every new report |
+| Abuse reports | `abuse_reports`; the warn log event `abuse.report_received` (Phase 2, IDs and category only; `urgent: true` for child safety) | Every new report. **Not built:** Phase 2 delivers no alert to anyone (owner decision 2026-10-16); the channel and the operator are future requirements (Q-022). |
+| Code guessing (Phase 2) | Log events `code.resolve_failures`, `code.resolve_blocked`, `code.resolve_failure_spike` (1,000 failures in 10 minutes) | Any spike; consider `short_codes_enabled` off ([runbook](runbooks/kill-switches.md)) |
+| Link unlock attempts (Phase 2) | Log event `link.unlock_rate_limited` | 10× baseline |
 | Supabase usage | Supabase dashboard alerts | 80% of MAU, Realtime connections, disk |
 | R2 storage | Cloudflare notifications / daily job | > 20% week-over-week growth |
 | Billing | `billing_events.status = 'failed'` | Any |
@@ -218,12 +220,13 @@ Phase 1 reads these on the server at request time and the root layout passes the
 | `ORIGIN_SHARED_SECRET`, `ORIGIN_SHARED_SECRET_PREVIOUS` | Origin lock |
 | `ALLOW_TEST_CLIENT_IP` | Tests only. **The production boot refuses to start if set**, and also refuses it with `TRUST_PROXY_MODE=cloudflare`. It takes effect only when `APP_ENV` is set explicitly to `local` or `test`. |
 | `DATABASE_URL` | `app_server` through the Supavisor pooler |
-| `SUPABASE_SECRET_KEY` | Optional. Validated when set, but unused in Phase 1; reserved for planned Auth admin operations. |
+| `SUPABASE_SECRET_KEY` | Optional. Validated when set, but unused (Phases 1 and 2); reserved for planned Auth admin operations. |
 | `R2_ACCOUNT_ID`, `R2_BUCKET`, `R2_S3_ENDPOINT`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` | Storage |
 | `NETWORK_KEY_SECRET_CURRENT`, `NETWORK_KEY_SECRET_PREVIOUS`, `NETWORK_KEY_VERSION` | Network keys (DEC-032) |
 | `NETWORK_IPV6_PREFIX_LEN` (default 64) | Local-mode tuning. The large-network cap moved to the runtime flag `network_large_cap` (DV1-5); `NETWORK_PROBE_HOSTS` is not used (no dual-stack probe). |
-| `LINK_PEPPER`, `CODE_PEPPER`, `INVITE_PEPPER`, `PEPPER_VERSION` | Secret hashing |
-| `TURNSTILE_SECRET_KEY` | Not used by the app in Phase 1: set in the Supabase project's Auth captcha settings, which verify the token. |
+| `LINK_PEPPER`, `CODE_PEPPER`, `PEPPER_VERSION`, `LINK_PEPPER_PREVIOUS`, `CODE_PEPPER_PREVIOUS` | Secret hashing for link secrets and short codes (Phase 2): ≥ 32 random characters each, different from each other, **required in staging and production**; `*_PREVIOUS` only during a rotation, with `PEPPER_VERSION` raised by one. `INVITE_PEPPER` arrives in Phase 4. |
+| `TURNSTILE_SECRET_KEY` | **Used by the app since Phase 2** (code-guessing escalation, abuse reports; required in staging and production, with the site key). The same secret is also set in the Supabase project's Auth captcha settings, which verify the anonymous sign-in token. |
+| `TURNSTILE_VERIFY_URL` | Tests and local development only: a stand-in for Cloudflare's siteverify. Refused in production builds and deployments. |
 | `TEST_CLIENT_IP_DEFAULT` | Tests and local development only (with `ALLOW_TEST_CLIENT_IP=1`): client IP assumed without `X-Test-Client-IP`. Refused like the override. |
 | `RUNTIME_FLAGS_CACHE_SECONDS` | Kill-switch cache, default 30, at most 300 (tests use 0) |
 | `LOG_LEVEL` | Logging |
@@ -256,8 +259,8 @@ All variables are validated with zod at boot (`lib/server/env.ts`, called from `
 | Runbook | Phase |
 |---|---|
 | [Shared-egress lists](runbooks/egress-lists.md) (written) | 1 |
-| Abuse report triage and takedown | 2 |
-| Kill switch usage | 2 |
+| [Abuse report triage and takedown](runbooks/takedown.md) (written; not rehearsed) | 2 |
+| [Kill switch usage](runbooks/kill-switches.md) (written) | 2 |
 | Janitor backlog / failed deletions | 3 |
 | Cron failure / heartbeat stale | 3 |
 | Incident response (security and availability) | 3 (before public beta) |

@@ -47,6 +47,8 @@ export type ObserveResponse = z.infer<typeof observeResponse>;
 // ---------------------------------------------------------------------------- shares
 export const SHARE_STATUSES = ["pending_upload", "active"] as const;
 export const FILE_STATUSES = ["pending", "verified", "rejected", "deleted"] as const;
+/** network: everyone on the network sees it. link_only: only through its links (DEC-033). */
+export const SHARE_SCOPES = ["network", "link_only"] as const;
 
 export const fileDto = z.object({
   id: z.uuid(),
@@ -63,6 +65,7 @@ export type FileDto = z.infer<typeof fileDto>;
 export const shareDto = z.object({
   id: z.uuid(),
   kind: z.enum(["files", "text"]),
+  scope: z.enum(SHARE_SCOPES),
   status: z.enum(SHARE_STATUSES),
   createdAt: z.iso.datetime({ offset: true }),
   expiresAt: z.iso.datetime({ offset: true }),
@@ -86,7 +89,8 @@ export const shareListResponse = z.object({
 export const localFeedResponse = shareListResponse.extend({ networkStatus });
 export type LocalFeedResponse = z.infer<typeof localFeedResponse>;
 
-const destination = z.literal("network");
+/** This network, or Link only: never visible on any network, only through its links (DEC-033). */
+const destination = z.enum(SHARE_SCOPES);
 const expiresIn = z.number().int().positive().optional();
 
 export const createTextBody = z
@@ -152,6 +156,112 @@ export const previewUrlResponse = z.object({
   url: z.url(),
   expiresAt: z.iso.datetime({ offset: true }),
 });
+
+// ---------------------------------------------------------------------------- share links (Phase 2)
+const isoDate = z.iso.datetime({ offset: true });
+const linkId = z.string().regex(/^[A-Za-z0-9_-]{16}$/);
+
+/** Creator only. expiresIn omitted: the link lasts as long as the share (never longer). */
+export const createLinkBody = z
+  .object({
+    expiresIn,
+    shortCode: z.object({ expiresIn }).strict().optional(),
+  })
+  .strict();
+
+export const regenerateCodeBody = z.object({ expiresIn }).strict();
+
+/** The plaintext code is returned once, when it is created (03 §4.4). */
+export const shortCodeDto = z.object({ code: z.string(), expiresAt: isoDate });
+
+/** Returned once: the URL carries the secret in its fragment, which is never stored. */
+export const createdLinkDto = z.object({
+  id: linkId,
+  url: z.url(),
+  createdAt: isoDate,
+  expiresAt: isoDate,
+  shortCode: shortCodeDto.nullable(),
+});
+export type CreatedLinkDto = z.infer<typeof createdLinkDto>;
+export const createLinkResponse = z.object({ link: createdLinkDto });
+export const regenerateCodeResponse = z.object({ shortCode: shortCodeDto });
+
+/** A link as its creator sees it later: never its secret, URL or code. */
+export const linkSummaryDto = z.object({
+  id: linkId,
+  createdAt: isoDate,
+  expiresAt: isoDate,
+  state: z.enum(["active", "expired", "revoked"]),
+  /** Set while the link has a live short code. */
+  shortCodeExpiresAt: isoDate.nullable(),
+  unlockCount: z.number().int().min(0),
+});
+export type LinkSummaryDto = z.infer<typeof linkSummaryDto>;
+export const linkListResponse = z.object({ links: z.array(linkSummaryDto) });
+
+// ---------------------------------------------------------------------------- link viewers (Phase 2)
+export const unlockBody = z.object({ secret: z.string().regex(/^[A-Za-z0-9_-]{43}$/) }).strict();
+
+export const resolveCodeBody = z
+  .object({
+    code: z.string().min(1).max(64),
+    turnstileToken: z.string().min(1).max(2048).optional(),
+  })
+  .strict();
+export const resolveCodeResponse = z.object({ linkId });
+
+/**
+ * What a link viewer receives (G4): the target share's content, never network or space IDs,
+ * presence, devices, the uploader, or anything about other shares.
+ */
+export const viewerFileDto = z.object({
+  id: z.uuid(),
+  name: z.string(),
+  sizeBytes: z.number().int().min(0),
+  type: z.string(),
+  previewable: z.boolean(),
+  /** Archives carry a warning (blocked kinds never reach a Free link). */
+  riskFlags: z.array(z.string()),
+});
+export type ViewerFileDto = z.infer<typeof viewerFileDto>;
+
+export const viewerContentResponse = z.object({
+  link: z.object({ id: linkId, expiresAt: isoDate }),
+  /** When this browser's access ends (the grant: ≤ 12 h, never after the link). */
+  access: z.object({ expiresAt: isoDate }),
+  share: z.object({
+    kind: z.enum(["files", "text"]),
+    expiresAt: isoDate,
+    text: z.object({ content: z.string() }).nullable(),
+    files: z.array(viewerFileDto),
+  }),
+});
+export type ViewerContent = z.infer<typeof viewerContentResponse>;
+
+// ---------------------------------------------------------------------------- abuse reports (Phase 2)
+export const REPORT_CATEGORIES = [
+  "malware", "phishing", "illegal", "child_safety", "copyright", "harassment", "spam", "other",
+] as const;
+export type ReportCategory = (typeof REPORT_CATEGORIES)[number];
+
+export const createReportBody = z
+  .object({
+    /** A link the reporter holds a grant for, or a share their device can see. */
+    target: z.discriminatedUnion("type", [
+      z.object({ type: z.literal("link"), linkId }).strict(),
+      z.object({ type: z.literal("share"), shareId: z.uuid() }).strict(),
+    ]),
+    category: z.enum(REPORT_CATEGORIES),
+    details: z.string().max(2000).optional(),
+    email: z.email().max(254).optional(),
+    turnstileToken: z.string().min(1).max(2048).optional(),
+  })
+  .strict()
+  .refine((body) => body.category !== "other" || (body.details?.trim().length ?? 0) >= 10, {
+    message: "Describe the problem (at least 10 characters)",
+    path: ["details"],
+  });
+export const createReportResponse = z.object({ report: z.object({ id: z.uuid() }) });
 
 // ---------------------------------------------------------------------------- errors
 export const errorResponse = z.object({

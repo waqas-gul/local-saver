@@ -481,10 +481,11 @@ select throws_ok(
   $$insert into app.shares (scope, kind, billing_subject_type, billing_subject_id, status, retention_class, expires_at, entitlement_snapshot)
     values ('network', 'text', 'user', '00000000-0000-4000-8000-000000000001', 'active', 'd7', now() + interval '1 day', '{}')$$,
   '23514', null, 'a network share needs a network space');
+-- Phase 2 added the link_only scope (never visible on a network); it can still never carry a space.
 select throws_ok(
-  $$insert into app.shares (scope, kind, billing_subject_type, billing_subject_id, status, retention_class, expires_at, entitlement_snapshot)
-    values ('link_only', 'text', 'user', '00000000-0000-4000-8000-000000000001', 'active', 'd7', now() + interval '1 day', '{}')$$,
-  '23514', null, 'link_only shares do not exist in Phase 1');
+  $$insert into app.shares (scope, network_space_id, kind, billing_subject_type, billing_subject_id, status, retention_class, expires_at, entitlement_snapshot)
+    values ('link_only', (select space_id from obs where step = 'b1'), 'text', 'user', '00000000-0000-4000-8000-000000000001', 'active', 'd7', now() + interval '1 day', '{}')$$,
+  '23514', null, 'a link_only share can never belong to a network space');
 select throws_ok(
   $$insert into app.files (share_id, object_key, original_name, declared_mime, stored_content_type, declared_size_bytes, upload_expires_at)
     values ('a0000000-0000-4000-8000-000000000005', 'uploads/report.pdf', 'report.pdf', 'application/pdf', 'application/pdf', 1, now())$$,

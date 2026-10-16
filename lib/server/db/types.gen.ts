@@ -25,6 +25,23 @@ export type JsonValue = JsonArray | JsonObject | JsonPrimitive;
 
 export type Timestamp = ColumnType<Date, Date | string, Date | string>;
 
+export interface AppAbuseReports {
+  action_taken: string | null;
+  category: string;
+  created_at: Generated<Timestamp>;
+  details: string | null;
+  id: Generated<string>;
+  link_id: string | null;
+  network_space_id: string | null;
+  reporter_email: string | null;
+  reporter_kind: string;
+  reporter_user_id: string | null;
+  resolved_at: Timestamp | null;
+  resolved_by: string | null;
+  share_id: string | null;
+  status: Generated<string>;
+}
+
 export interface AppAuditEvents {
   action: string;
   actor_device_id: string | null;
@@ -56,6 +73,7 @@ export interface AppDownloads {
   event: string;
   file_id: string | null;
   id: Generated<Int8>;
+  link_id: string | null;
   network_space_id: string | null;
   retention_until: Timestamp;
   share_id: string;
@@ -97,6 +115,22 @@ export interface AppIdempotencyKeys {
   key_hash: Buffer;
   response: Json;
   user_id: string;
+}
+
+export interface AppLinkGrants {
+  expires_at: Timestamp;
+  granted_at: Generated<Timestamp>;
+  granted_via: string;
+  link_id: string;
+  password_version: Generated<number>;
+  session_id_hash: Buffer;
+}
+
+export interface AppLinkSessions {
+  created_at: Generated<Timestamp>;
+  expires_at: Timestamp;
+  id_hash: Buffer;
+  last_seen_at: Generated<Timestamp>;
 }
 
 export interface AppNetworkEgressRanges {
@@ -157,6 +191,28 @@ export interface AppRuntimeFlags {
   updated_at: Generated<Timestamp>;
   updated_by: string | null;
   value: Generated<Json>;
+}
+
+export interface AppShareLinks {
+  allow_download: Generated<boolean>;
+  created_at: Generated<Timestamp>;
+  created_by_device_id: string | null;
+  created_by_user_id: string | null;
+  entitlement_snapshot: Json;
+  expires_at: Timestamp;
+  id: string;
+  last_unlocked_at: Timestamp | null;
+  pepper_version: number;
+  revoke_reason: string | null;
+  revoked_at: Timestamp | null;
+  revoked_by_user_id: string | null;
+  secret_hmac: Buffer;
+  share_id: string;
+  short_code_expires_at: Timestamp | null;
+  short_code_hmac: Buffer | null;
+  short_code_pepper_version: number | null;
+  target_type: Generated<string>;
+  unlock_count: Generated<number>;
 }
 
 export interface AppShares {
@@ -224,17 +280,21 @@ export interface AppUserFlags {
 }
 
 export interface DB {
+  "app.abuse_reports": AppAbuseReports;
   "app.audit_events": AppAuditEvents;
   "app.devices": AppDevices;
   "app.downloads": AppDownloads;
   "app.files": AppFiles;
   "app.idempotency_keys": AppIdempotencyKeys;
+  "app.link_grants": AppLinkGrants;
+  "app.link_sessions": AppLinkSessions;
   "app.network_egress_ranges": AppNetworkEgressRanges;
   "app.network_presence": AppNetworkPresence;
   "app.network_spaces": AppNetworkSpaces;
   "app.object_deletions": AppObjectDeletions;
   "app.rate_counters": AppRateCounters;
   "app.runtime_flags": AppRuntimeFlags;
+  "app.share_links": AppShareLinks;
   "app.shares": AppShares;
   "app.storage_reservations": AppStorageReservations;
   "app.storage_usage": AppStorageUsage;

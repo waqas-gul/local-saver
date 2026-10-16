@@ -5,10 +5,13 @@ import "server-only";
  * the feed (listLocalFeed in lib/server/shares/read.ts) applies its network part in SQL, and
  * creators reach their shares from other networks through My uploads (listMyShares).
  *
- *   visible(share) = scope = 'network' and expires_at > now()
+ *   visible(share) = scope in ('network', 'link_only') and expires_at > now()
  *     and status = 'active'                     (claimed shares arrive in Phase 3)
- *     and (space in the caller's eligible spaces or caller is the creator)
+ *     and (caller is the creator
+ *          or (scope = 'network' and space in the caller's eligible spaces))
  *
+ * Link-only shares (DEC-033) are never visible on any network: through this API only their
+ * creator sees them; everyone else reaches them only with a link grant (lib/server/links).
  * Uploads in progress (pending_upload) are visible only to their creator.
  * Not visible → the caller gets the same 404 as for a share that does not exist.
  */
@@ -30,12 +33,13 @@ export type VisibilityContext = {
 };
 
 export function isShareVisible(share: VisibleShareFields, ctx: VisibilityContext): boolean {
-  if (share.scope !== "network") return false;
+  if (share.scope !== "network" && share.scope !== "link_only") return false;
   if (!share.expiresAt || share.expiresAt.getTime() <= ctx.now.getTime()) return false;
 
   const isCreator = share.createdByUserId !== null && share.createdByUserId === ctx.userId;
   if (share.status === "pending_upload") return isCreator;
   if (share.status !== "active") return false;
+  if (isCreator) return true;
 
-  return isCreator || (share.networkSpaceId !== null && ctx.eligibleSpaceIds.includes(share.networkSpaceId));
+  return share.scope === "network" && share.networkSpaceId !== null && ctx.eligibleSpaceIds.includes(share.networkSpaceId);
 }

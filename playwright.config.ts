@@ -7,8 +7,8 @@ import { LOCAL, STORAGE, supabaseStatus } from "./scripts/local-stack.cjs";
  * - OPEN   (port 3100): local mode, no trusted proxy, no services (Phase 0 smoke tests).
  * - LOCKED (port 3101): TRUST_PROXY_MODE=cloudflare, so the origin lock is active (T-008).
  * - STACK  (port 3102): the full local stack (Supabase, RustFS) with the test client-IP
- *   override, for the Phase 1 multi-device tests (tests/e2e/local-*.spec.ts). Started only
- *   when the local stack is running (`pnpm stack:start`).
+ *   override, for the Phase 1 multi-device and Phase 2 remote-sharing tests
+ *   (tests/e2e/local-*.spec.ts). Started only when the local stack is running (`pnpm stack:start`).
  */
 
 export const OPEN_URL = "http://127.0.0.1:3100";
@@ -61,6 +61,9 @@ function stackServer() {
       R2_ACCESS_KEY_ID: STORAGE.accessKeyId,
       R2_SECRET_ACCESS_KEY: STORAGE.secretAccessKey,
       NETWORK_KEY_SECRET_CURRENT: LOCAL.networkKeySecret,
+      // Phase 2 remote links and codes. No Turnstile here: reports and code checks run without it.
+      LINK_PEPPER: LOCAL.linkPepper,
+      CODE_PEPPER: LOCAL.codePepper,
       LOG_LEVEL: "warn",
     } as Record<string, string>,
   };

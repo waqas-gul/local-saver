@@ -9,13 +9,16 @@ import { resolveEntitlements } from "../entitlements/plans";
 import type { Env } from "../env";
 import { ApiError, notFound } from "../http/errors";
 import type { NetworkView } from "../network/current";
-import { assertCanPost } from "../policy/posting";
+import { postingTarget } from "../policy/posting";
 import { enforceRateLimit } from "../ratelimit/limits";
 import { loadShareDto } from "./dto";
 import { resolveExpiry } from "./expiry";
 import { requireOwnShare } from "./read";
 
-/** Text shares (04 §4.5, DEC-027): versioned last-writer-wins edits by the creator only (Q-021). */
+/**
+ * Text shares (04 §4.5, DEC-027): posted to this network or link-only (DEC-033); versioned
+ * last-writer-wins edits by the creator only (Q-021).
+ */
 
 function assertTextSize(content: string, maxBytes: number): number {
   const bytes = Buffer.byteLength(content, "utf8");
@@ -28,19 +31,23 @@ export async function createText(
   network: NetworkView,
   body: z.infer<typeof createTextBody>,
   env: Env,
+  request: Request,
 ): Promise<ShareDto> {
-  const spaceId = await assertCanPost(caller, network, env, { files: false });
+  const { spaceId, networkLimitKey } = await postingTarget(caller, network, request, env, {
+    files: false,
+    destination: body.destination,
+  });
   const entitlements = resolveEntitlements(caller.principal);
   const bytes = assertTextSize(body.content, entitlements.limits.maxTextBytes);
   const expiry = resolveExpiry(entitlements, body.expiresIn);
   await enforceRateLimit("textWriteUser", caller.principal.userId);
-  await enforceRateLimit("textWriteSpace", spaceId);
+  await enforceRateLimit("textWriteSpace", networkLimitKey);
 
   return getDb().transaction().execute(async (trx) => {
     const share = await trx
       .insertInto("app.shares")
       .values({
-        scope: "network",
+        scope: body.destination,
         network_space_id: spaceId,
         kind: "text",
         created_by_user_id: caller.principal.userId,
@@ -64,7 +71,9 @@ export async function createText(
         updated_by_device_id: caller.device.id,
       })
       .execute();
-    await trx.updateTable("app.network_spaces").set({ last_share_at: sql`now()` }).where("id", "=", spaceId).execute();
+    if (spaceId) {
+      await trx.updateTable("app.network_spaces").set({ last_share_at: sql`now()` }).where("id", "=", spaceId).execute();
+    }
     await audit(trx, {
       action: "share.created",
       actorUserId: caller.principal.userId,
@@ -72,7 +81,7 @@ export async function createText(
       networkSpaceId: spaceId,
       targetType: "share",
       targetId: share.id,
-      metadata: { kind: "text", scope: "network" },
+      metadata: { kind: "text", scope: body.destination },
     });
     return loadShareDto(trx, share.id, caller.principal.userId);
   });

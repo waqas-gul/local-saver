@@ -1,11 +1,19 @@
 import { spawn } from "node:child_process";
+import { createWriteStream, mkdtempSync } from "node:fs";
+import { createServer, type Server } from "node:http";
 import { createRequire } from "node:module";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { TestProject } from "vitest/node";
 import { ensureBucket, LOCAL, STORAGE, supabaseStatus } from "../../../scripts/local-stack.cjs";
 
 /**
  * Starts `next start` (production build, NODE_ENV=test) against the local stack:
  * Supabase (Postgres, Auth, Realtime) and RustFS. Requires `pnpm build` and `pnpm stack:start`.
+ *
+ * Phase 2: the server verifies Turnstile (code escalation, reports) against a local stand-in for
+ * Cloudflare's siteverify endpoint: tokens starting "pass-" succeed once, anything else fails.
+ * Its output goes to a log file the tests read (secrets must never appear there).
  */
 
 export type StackInfo = {
@@ -14,6 +22,8 @@ export type StackInfo = {
   publishableKey: string;
   adminDatabaseUrl: string;
   storage: { endpoint: string; bucket: string; accessKeyId: string; secretAccessKey: string };
+  /** The integration server's stdout and stderr. */
+  serverLog: string;
 };
 
 declare module "vitest" {
@@ -23,6 +33,26 @@ declare module "vitest" {
 }
 
 const PORT = 3200;
+const TURNSTILE_PORT = 3299;
+export const TEST_TURNSTILE_SECRET = "integration-turnstile-secret";
+
+/** Cloudflare's siteverify, as far as the server relies on it: success for unused "pass-" tokens. */
+function startTurnstileStub(): Promise<Server> {
+  const used = new Set<string>();
+  const server = createServer((req, res) => {
+    let raw = "";
+    req.on("data", (chunk) => (raw += chunk));
+    req.on("end", () => {
+      const form = new URLSearchParams(raw);
+      const token = form.get("response") ?? "";
+      const success = form.get("secret") === TEST_TURNSTILE_SECRET && token.startsWith("pass-") && !used.has(token);
+      used.add(token);
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify(success ? { success: true } : { success: false, "error-codes": ["invalid-input-response"] }));
+    });
+  });
+  return new Promise((resolve) => server.listen(TURNSTILE_PORT, "127.0.0.1", () => resolve(server)));
+}
 
 async function waitForReady(url: string, log: () => string): Promise<void> {
   const deadline = Date.now() + 90_000;
@@ -42,6 +72,8 @@ async function waitForReady(url: string, log: () => string): Promise<void> {
 export default async function setup(project: TestProject) {
   const supabase = supabaseStatus();
   await ensureBucket();
+  const turnstile = await startTurnstileStub();
+  const serverLog = join(mkdtempSync(join(tmpdir(), "local-saver-it-")), "server.log");
 
   const origin = `http://127.0.0.1:${PORT}`;
   const env: NodeJS.ProcessEnv = {
@@ -64,9 +96,15 @@ export default async function setup(project: TestProject) {
     R2_SECRET_ACCESS_KEY: STORAGE.secretAccessKey,
     NETWORK_KEY_SECRET_CURRENT: LOCAL.networkKeySecret,
     NETWORK_KEY_VERSION: "1",
+    LINK_PEPPER: LOCAL.linkPepper,
+    CODE_PEPPER: LOCAL.codePepper,
+    NEXT_PUBLIC_TURNSTILE_SITE_KEY: "integration-turnstile-site-key",
+    TURNSTILE_SECRET_KEY: TEST_TURNSTILE_SECRET,
+    TURNSTILE_VERIFY_URL: `http://127.0.0.1:${TURNSTILE_PORT}/siteverify`,
     // Kill-switch tests flip flags in the database and need them to apply immediately.
     RUNTIME_FLAGS_CACHE_SECONDS: "0",
-    LOG_LEVEL: "warn",
+    // info, so the secret-leak test also covers the informational events (unlock failures).
+    LOG_LEVEL: "info",
   };
 
   const nextBin = createRequire(import.meta.url).resolve("next/dist/bin/next");
@@ -75,10 +113,17 @@ export default async function setup(project: TestProject) {
     stdio: ["ignore", "pipe", "pipe"],
   });
   let output = "";
-  child.stdout?.on("data", (chunk) => (output += chunk));
-  child.stderr?.on("data", (chunk) => (output += chunk));
+  let ready = false;
+  const logFile = createWriteStream(serverLog);
+  const capture = (chunk: Buffer) => {
+    if (!ready) output += chunk; // only needed to explain a failed start
+    logFile.write(chunk);
+  };
+  child.stdout?.on("data", capture);
+  child.stderr?.on("data", capture);
 
   await waitForReady(`${origin}/api/v1/health?ready=1`, () => output);
+  ready = true;
 
   project.provide("stack", {
     origin,
@@ -91,9 +136,12 @@ export default async function setup(project: TestProject) {
       accessKeyId: STORAGE.accessKeyId,
       secretAccessKey: STORAGE.secretAccessKey,
     },
+    serverLog,
   });
 
   return () => {
     child.kill();
+    turnstile.close();
+    logFile.end();
   };
 }

@@ -3,7 +3,7 @@ import { Geist, Geist_Mono } from "next/font/google";
 import { headers } from "next/headers";
 import { connection } from "next/server";
 import type { PublicConfig } from "@/lib/client/config";
-import { AppProviders } from "@/lib/client/providers";
+import { RootProviders } from "@/lib/client/providers";
 import { getEnv } from "@/lib/server/env";
 import "./globals.css";
 
@@ -41,12 +41,14 @@ export default async function RootLayout({ children }: LayoutProps<"/">) {
   await connection();
   const nonce = (await headers()).get("x-nonce") ?? undefined;
 
+  // Each route group adds its own providers: (app) the full app runtime, (share) the link
+  // viewer's (no Supabase session), (legal) none.
   return (
     <html lang="en" className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}>
       <body className="min-h-full flex flex-col">
-        <AppProviders config={publicConfig()} nonce={nonce}>
+        <RootProviders config={publicConfig()} nonce={nonce}>
           {children}
-        </AppProviders>
+        </RootProviders>
       </body>
     </html>
   );

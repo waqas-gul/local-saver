@@ -72,7 +72,7 @@ DEC-031 (ACCEPTED), DEC-034 (ACCEPTED, frontend state), DEC-001 (ACCEPTED, Next.
 
 ## 7. Files / modules involved
 
-Key modules as built (2026-10-15). The whole layout is in [ARCHITECTURE.md §14](../ARCHITECTURE.md#14-current-project-structure) and [02 §7](../02-system-architecture.md#7-application-module-layout-target).
+Key modules as built (2026-10-15). The whole layout is in [ARCHITECTURE.md §15](../ARCHITECTURE.md#15-current-project-structure) and [02 §7](../02-system-architecture.md#7-application-module-layout-target).
 
 - `lib/server/network/{client-ip.ts, normalize.ts, key.ts, egress.ts, current.ts, observe.ts}`. There is no `probe.ts`: the dual-stack probe was not built (DV1-3).
 - `lib/server/local/visibility.ts`. The local feed query is in `lib/server/shares/read.ts`.

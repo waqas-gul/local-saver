@@ -24,6 +24,19 @@ export function notFound(): ApiError {
   return new ApiError(404, "NOT_FOUND", "Not found");
 }
 
+/**
+ * Link viewers (03 §4.2): an unknown link, a wrong secret and a missing grant all get this same
+ * 404, so nothing about a link is revealed before its secret is proven (T-030).
+ */
+export function linkUnavailable(): ApiError {
+  return new ApiError(404, "LINK_UNAVAILABLE", "This link isn't available");
+}
+
+/** Only after the secret (or a grant) is proven: the link was revoked, expired or its share ended. */
+export function linkExpired(): ApiError {
+  return new ApiError(410, "LINK_EXPIRED", "This link has expired or was turned off");
+}
+
 export type ErrorBody = {
   error: { code: string; message: string; requestId: string; details?: unknown };
 };

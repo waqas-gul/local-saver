@@ -100,6 +100,13 @@ export function AppShell({ children }: { children: ReactNode }) {
         <DeviceLabel />
       </header>
       <main className="flex-1">{children}</main>
+      <footer className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
+        <Link href="/c">Enter a share code</Link>
+        <Link href="/terms">Terms</Link>
+        <Link href="/privacy">Privacy</Link>
+        <Link href="/acceptable-use">Acceptable use</Link>
+        <Link href="/report">Report abuse</Link>
+      </footer>
     </div>
   );
 }
