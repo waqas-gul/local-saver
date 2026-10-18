@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { mailCode, mailLink, newEmail, signInThroughUi } from "./support/accounts";
+import { createAccount, mailCode, mailLink, newEmail, signInThroughUi } from "./support/accounts";
 import { fitsScreen, newNetwork, openDevice, postText, unique } from "./support/local-devices";
 
 /**
@@ -79,13 +79,20 @@ test("an account changes its email with a code from each address (P4-08)", async
   const device = await openDevice(browser, newNetwork().ip());
   const before = newEmail("old");
   const after = newEmail("new");
-  await signInThroughUi(device.page, before);
+  // An existing account, so this browser signs in to it rather than signing up: a sign-up is itself an email change,
+  // and Supabase Auth refuses another one within max_frequency (429 over_email_send_rate_limit).
+  await createAccount(before);
+  await signInThroughUi(device.page, before, { merge: true });
   await device.page.getByTestId("account-link").click();
   await device.page.getByTestId("change-email").click();
   await device.page.getByLabel("New email").fill(after);
   const since = new Date();
   await device.page.getByRole("button", { name: "Send code" }).click();
-  await device.page.getByLabel("Code sent to your current email").fill(await mailCode(before, since));
+  // The code fields show once Auth has sent both emails; read before that, the current address's newest mail can
+  // still be the sign-in code.
+  const currentCode = device.page.getByLabel("Code sent to your current email");
+  await expect(currentCode).toBeVisible();
+  await currentCode.fill(await mailCode(before, since));
   await device.page.getByLabel("Code sent to the new email").fill(await mailCode(after, since));
   await device.page.getByRole("button", { name: "Continue" }).click();
   await expect(device.page.getByText("Your email is changed.")).toBeVisible();

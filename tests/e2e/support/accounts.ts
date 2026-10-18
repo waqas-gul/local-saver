@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { expect, type Page } from "@playwright/test";
+import { createClient } from "@supabase/supabase-js";
 
 /**
  * Accounts in the browser (Phase 4A E2E): sign-in codes are read from mailpit, as a person reads
@@ -15,7 +16,10 @@ function mailpitUrl(): string {
   return stack.mailpitUrl;
 }
 
-/** The newest mail to `email` sent after `since` that `pick` finds something in. */
+/**
+ * The newest mail to `email` sent after `since` that `pick` finds something in. Call it once the app shows that the
+ * mail was sent: mails up to a second before `since` count, so an earlier read can still find the previous code.
+ */
 async function fromMail(email: string, since: Date, pick: (message: { Text: string; HTML: string }) => string | undefined): Promise<string> {
   const deadline = Date.now() + 15_000;
   while (Date.now() < deadline) {
@@ -39,6 +43,15 @@ export function mailCode(email: string, since: Date): Promise<string> {
 /** The link in the newest mail to `email` sent after `since` (P4-23: it opens this app's /auth/callback). */
 export function mailLink(email: string, since: Date): Promise<string> {
   return fromMail(email, since, (message) => message.HTML.match(/href="([^"]+)"/)?.[1]?.replace(/&amp;/g, "&"));
+}
+
+/** A permanent account made through Supabase Auth's admin API: confirmed, and sent no email. */
+export async function createAccount(email: string): Promise<void> {
+  const stack = JSON.parse(process.env.LOCAL_SAVER_E2E_STACK ?? "{}") as { url?: string; secretKey?: string };
+  if (!stack.url || !stack.secretKey) throw new Error("the local stack is not running (pnpm stack:start)");
+  const admin = createClient(stack.url, stack.secretKey, { auth: { persistSession: false, autoRefreshToken: false } });
+  const { error } = await admin.auth.admin.createUser({ email, email_confirm: true });
+  if (error) throw new Error(`account creation failed: ${error.message}`);
 }
 
 /** From the app's header to signed in: the login page, the email, the code from the mail. */
