@@ -108,8 +108,10 @@ port = 54324
 # Uncomment to expose additional ports for testing user applications that send emails.
 # smtp_port = 54325
 # pop3_port = 54326
-# admin_email = "admin@email.com"
-# sender_name = "Admin"
+# Phase 4 (P4-23): the sender looks like production's, with an address on a reserved domain that no
+# one receives (RFC 2606). Staging and production senders: infra/email/README.md.
+admin_email = "no-reply@local-saver.test"
+sender_name = "Local Saver"
 
 [storage]
 # Files live in Cloudflare R2, not Supabase Storage (DEC-009).
@@ -160,7 +162,15 @@ site_url = "http://127.0.0.1:3000"
 # The public URL that Auth serves on. Defaults to the API external URL with `/auth/v1` appended.
 # external_url = ""
 # A list of *exact* URLs that auth providers are permitted to redirect to post authentication.
-additional_redirect_urls = ["https://127.0.0.1:3000"]
+# Phase 4 (P4-04): the sign-in callback page (PKCE) on the dev server and on the E2E (3102) and
+# integration (3200) servers. Hosted projects list their own origin's /auth/callback only.
+additional_redirect_urls = [
+  "https://127.0.0.1:3000",
+  "http://127.0.0.1:3000/auth/callback",
+  "http://localhost:3000/auth/callback",
+  "http://127.0.0.1:3102/auth/callback",
+  "http://127.0.0.1:3200/auth/callback",
+]
 # How long tokens are valid for, in seconds. Defaults to 3600 (1 hour), maximum 604,800 (1 week).
 jwt_expiry = 3600
 # JWT issuer URL. If not set, defaults to auth.external_url.
@@ -178,7 +188,8 @@ enable_signup = true
 # Every browser is an anonymous Supabase user with an app.devices row (DEC-005).
 enable_anonymous_sign_ins = true
 # Allow/disallow testing manual linking of accounts
-enable_manual_linking = false
+# Phase 4 (P4-04, §17.5.3): an anonymous user links Google with linkIdentity, keeping its user ID.
+enable_manual_linking = true
 # Passwords shorter than this value will be rejected as weak. Minimum 6, recommended 8 or more.
 minimum_password_length = 6
 # Passwords that do not meet the following requirements will be rejected as weak. Supported values
@@ -197,7 +208,9 @@ password_requirements = ""
 
 [auth.rate_limit]
 # Number of emails that can be sent per hour. Requires auth.email.smtp to be enabled.
-email_sent = 2
+# Local only (Phase 4): tests sign in many accounts through mailpit. Hosted projects keep the
+# custom-SMTP limit reviewed with the email provider (17.5.8).
+email_sent = 5000
 # Number of SMS messages that can be sent per hour. Requires auth.sms to be enabled.
 sms_sent = 30
 # Number of anonymous sign-ins that can be made per hour per IP address. Requires enable_anonymous_sign_ins = true.
@@ -207,9 +220,11 @@ anonymous_users = 5000
 # Number of sessions that can be refreshed in a 5 minute interval per IP address.
 token_refresh = 150
 # Number of sign up and sign-in requests that can be made in a 5 minute interval per IP address (excludes anonymous users).
-sign_in_sign_ups = 30
+# Local only (Phase 4): every test account signs in from 127.0.0.1. Hosted projects keep 30.
+sign_in_sign_ups = 5000
 # Number of OTP / Magic link verifications that can be made in a 5 minute interval per IP address.
-token_verifications = 30
+# Local only (Phase 4), as above. Hosted projects keep 30.
+token_verifications = 5000
 # Number of Web3 logins that can be made in a 5 minute interval per IP address.
 web3 = 30
 
@@ -226,17 +241,26 @@ enable_signup = true
 # addresses. If disabled, only the new email is required to confirm.
 double_confirm_changes = true
 # If enabled, users need to confirm their email address before signing in.
-enable_confirmations = false
+# Phase 4 (P4-00 finding): must be true. With it off, Auth "autoconfirms" an email change, so an
+# anonymous user's updateUser({ email }) made the account permanent with an email nobody proved
+# (anyone could pre-claim someone else's address). Hosted projects: "Confirm email" on (17.24).
+enable_confirmations = true
 # If enabled, users will need to reauthenticate or have logged in recently to change their password.
 secure_password_change = false
 # Controls the minimum amount of time that must pass before sending another signup confirmation or password reset email.
+# Local only: tests ask for several codes per address. Hosted projects keep 60 s, which the UI's resend timer assumes
+# (RESEND_SECONDS, P4-23).
 max_frequency = "1s"
 # Number of characters used in the email OTP.
 otp_length = 6
 # Number of seconds before the email OTP expires (defaults to 1 hour).
+# The templates and the login page say "1 hour" (tests/unit/email-templates.test.ts); hosted projects the same.
 otp_expiry = 3600
 
 # Use a production-ready SMTP server
+# Phase 4 (P4-23): locally, mail goes to mailpit ([local_smtp]). Staging and production set custom SMTP in
+# the Supabase dashboard (provider, host, sender, the password as a dashboard secret): infra/email/README.md.
+# Never enable this block here: the local stack would send real email.
 # [auth.email.smtp]
 # enabled = true
 # host = "smtp.sendgrid.net"
@@ -246,10 +270,31 @@ otp_expiry = 3600
 # admin_email = "admin@email.com"
 # sender_name = "Admin"
 
-# Uncomment to customize email template
-# [auth.email.template.invite]
-# subject = "You have been invited"
-# content_path = "./supabase/templates/invite.html"
+# Phase 4 (P4-04, 17.5.8): Supabase Auth sends every email in Phase 4. Each template carries the
+# 6-digit code (the UI asks for it, so the flow finishes in the browser that started it) and the
+# link. Plain text-like HTML: no images, no tracking. Copy is OWNER REVIEW.
+# P4-23: the link opens the app's /auth/callback#confirm=…, which follows Supabase's link only after a
+# click (mail scanners open links, and following it would use up the code). The password-reset email
+# carries no code or link (no passwords, D4-2). The same files go to staging and production.
+[auth.email.template.magic_link]
+subject = "Your Local Saver sign-in code"
+content_path = "./supabase/templates/magic-link.html"
+
+[auth.email.template.confirmation]
+subject = "Your Local Saver sign-up code"
+content_path = "./supabase/templates/confirmation.html"
+
+[auth.email.template.email_change]
+subject = "Confirm your email for Local Saver"
+content_path = "./supabase/templates/email-change.html"
+
+[auth.email.template.reauthentication]
+subject = "Your Local Saver confirmation code"
+content_path = "./supabase/templates/reauthentication.html"
+
+[auth.email.template.recovery]
+subject = "Local Saver has no password to reset"
+content_path = "./supabase/templates/recovery.html"
 
 # Uncomment to customize notification email template
 # [auth.email.notification.password_changed]
@@ -302,9 +347,11 @@ auth_token = "env(SUPABASE_AUTH_SMS_TWILIO_AUTH_TOKEN)"
 max_enrolled_factors = 10
 
 # Control MFA via App Authenticator (TOTP)
+# Phase 4 (P4-04, 17.5.9): optional TOTP for accounts. Sensitive actions require aal2 once a
+# factor is verified (D4-30).
 [auth.mfa.totp]
-enroll_enabled = false
-verify_enabled = false
+enroll_enabled = true
+verify_enabled = true
 
 # Configure MFA via Phone Messaging
 [auth.mfa.phone]
@@ -335,6 +382,17 @@ url = ""
 # If enabled, the nonce check will be skipped. Required for local sign in with Google auth.
 skip_nonce_check = false
 # If enabled, it will allow the user to successfully authenticate when the provider does not return an email address.
+email_optional = false
+
+# Phase 4 (D4-2): Google sign-in. Off locally: it needs a real OAuth client (an owner item,
+# 17.24), so local tests stub it. To try it locally, set the two variables and enabled = true.
+[auth.external.google]
+enabled = false
+client_id = "env(SUPABASE_AUTH_EXTERNAL_GOOGLE_CLIENT_ID)"
+secret = "env(SUPABASE_AUTH_EXTERNAL_GOOGLE_SECRET)"
+redirect_uri = ""
+url = ""
+skip_nonce_check = false
 email_optional = false
 
 # Allow Solana wallet holders to sign in to your project via the Sign in with Solana (SIWS, EIP-4361) standard.

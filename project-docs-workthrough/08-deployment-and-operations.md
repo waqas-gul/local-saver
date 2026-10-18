@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Document status | PROPOSED — hosting choice is CONDITIONAL on SP-01 (DEC-022) |
-| Last updated | 2026-10-16 (Phase 2 owner decisions: no abuse alert is delivered in Phase 2, §8). 2026-10-15 (Phase 2: peppers and the Turnstile secret in the configuration inventory, Phase 2 alert events, takedown and kill-switch runbooks). Earlier the same day: (Phase 1: local stack with RustFS, configuration inventory, CI stack job, Turnstile secret in Supabase; security review: Pseudo IPv4, query-parameter logging, egress-list loading and alert, `if-none-match` in CORS, egress runbook; second review pass: no client address in database parameters, `auto_explain`, Supabase Auth IP storage, access logs, WebKit in CI, manual verification procedure). Earlier: 2026-09-29; 2026-09-23. |
+| Last updated | 2026-10-18 (Phase 4, P4-25: docs and runbooks: the staging Access bypass for the billing webhook in §4; the billing go-live steps point at the new [billing runbook](runbooks/billing.md) in §5; the `extensions` signal in §8; §9.2 corrected (no `INVITE_PEPPER`, DV4-83; the Supabase secret key still unused by the app; the Google OAuth client secret only in Supabase); §11 runbooks written). 2026-10-18 (Phase 4, P4-24: MFA: TOTP and the organisation's dashboard MFA in §5, the JWT expiry note, the accounts runbook in §11). 2026-10-18 (Phase 4, P4-23: email: Mailpit in the local stack, an Email row in §3, custom SMTP and the email templates in §5 from [`infra/email/README.md`](../infra/email/README.md), the SMTP password in §9). 2026-10-16 (Phase 2 owner decisions: no abuse alert is delivered in Phase 2, §8). 2026-10-15 (Phase 2: peppers and the Turnstile secret in the configuration inventory, Phase 2 alert events, takedown and kill-switch runbooks). Earlier the same day: (Phase 1: local stack with RustFS, configuration inventory, CI stack job, Turnstile secret in Supabase; security review: Pseudo IPv4, query-parameter logging, egress-list loading and alert, `if-none-match` in CORS, egress runbook; second review pass: no client address in database parameters, `auto_explain`, Supabase Auth IP storage, access logs, WebKit in CI, manual verification procedure). Earlier: 2026-09-29; 2026-09-23. |
 | Key decisions | DEC-004, DEC-017, DEC-022, DEC-028, DEC-029, DEC-030 |
 
 ---
@@ -75,10 +75,11 @@ flowchart LR
 | Aspect | Local | Staging | Production |
 |---|---|---|---|
 | Web | `next dev` (or `next start` with `NODE_ENV=test` for tests) | Separate app or container at `staging.{domain}`, **behind Cloudflare Access** | `app.{domain}` (or apex) |
-| Supabase | CLI local stack (Docker): `pnpm stack:start` runs Postgres, Auth, Realtime, the API gateway and PostgREST (Studio, Storage, Edge Runtime, logging, pooler and Mailpit excluded until needed) | Separate project. Free plan is acceptable but pauses after 1 week inactive, so keep it active or use Pro. | **Pro** plan project in the region chosen by Q-016 |
+| Supabase | CLI local stack (Docker): `pnpm stack:start` runs Postgres, Auth, Realtime, the API gateway, PostgREST, the Edge Runtime (the storage janitor, Phase 3) and Mailpit (Phase 4: every email Auth sends lands there); Studio, Storage, logging and the pooler are excluded | Separate project. Free plan is acceptable but pauses after 1 week inactive, so keep it active or use Pro. | **Pro** plan project in the region chosen by Q-016 |
 | R2 | **RustFS 1.0.1** (S3-compatible, container `local-saver-s3`, started by `pnpm stack:start`; phase 1 DV1-4) or a real dev bucket | `{product}-files-staging` | `{product}-files-prod` |
 | Cloudflare | Not used. Test client-IP override allowed (non-production only). | Proxied + Access + Turnstile (staging keys) | Proxied + WAF + rate limiting + Turnstile (production keys) |
 | Billing (Phase 4) | Provider sandbox | Sandbox | Live |
+| Email (Phase 4, P4-23) | Mailpit (`http://127.0.0.1:54324`); sender `no-reply@local-saver.test` | Custom SMTP (provider D4-8), `mail.staging.{domain}` | Custom SMTP, `mail.{domain}` with SPF, DKIM and DMARC ([`infra/email/README.md`](../infra/email/README.md)) |
 | Data | `supabase/seed.sql` (local `app_server` login); tests create their own data on random networks | Synthetic only | Real |
 
 ---
@@ -97,7 +98,7 @@ flowchart LR
 - [ ] Custom WAF rules: allow only expected methods per path prefix. Exempt the billing webhook path from bot challenges.
 - [ ] Bot protections: verify they don't challenge API or webhook calls. Tune or disable per path where the plan allows.
 - [ ] Turnstile widgets per environment, restricted to that environment's hostnames.
-- [ ] Cloudflare Access protects staging (service token for CI smoke tests).
+- [ ] Cloudflare Access protects staging (service token for CI smoke tests), with a bypass for `/api/v1/billing/webhook` once billing is live there: the provider can't log in, and the webhook authenticates by its signature ([billing runbook](runbooks/billing.md) §8).
 - [ ] Notifications: origin error rate, DDoS alerts, R2 usage.
 - [ ] (Option B) Cloudflare Tunnel configured with the ingress rule to the Next.js container.
 
@@ -111,10 +112,21 @@ flowchart LR
 - [ ] Auth:
   - [ ] Anonymous sign-ins enabled.
   - [ ] **CAPTCHA (Turnstile) enabled**, with the Turnstile **secret** key set here (Supabase verifies the token at anonymous sign-in; the app only has the site key).
-  - [ ] JWT expiry reviewed (consider 30 min).
+  - [ ] JWT expiry reviewed (consider 30 min). P4-24: when an account turns on its authenticator, Auth ends its other sessions, but their access tokens stay valid until they expire; the app refuses them (`MFA_REQUIRED`), and a shorter expiry shortens that window.
   - [ ] Site URL and redirect allow-list set.
   - [ ] Rate limits reviewed (anonymous sign-ins default 30/h per IP).
-  - [ ] Custom SMTP (Phase 4). TOTP MFA enabled (Phase 4).
+  - [ ] **Custom SMTP and the email templates (Phase 4, P4-23):** the SMTP values, the five templates and subjects pasted from `supabase/templates/*`, 60 s between emails to one address, emails per hour raised from the custom-SMTP default, then the delivery checks E-1 … E-9 ([`infra/email/README.md`](../infra/email/README.md) §4, §7). **Never `supabase config push` the local `config.toml`** (local-only limits and URLs).
+  - [ ] **TOTP MFA (Phase 4, P4-24):** Authentication → Multi-Factor: TOTP enrolment and verification on (`[auth.mfa.totp]` locally); at most 10 factors per user. Then check on staging: an account turns it on and its other browsers are signed out; a new sign-in reaches the authenticator step before the app; the limit on wrong codes (the local stack has none to speak of) ([accounts runbook](runbooks/accounts.md) §7).
+  - [ ] **Organisation MFA:** every member of the Supabase organisation must use MFA on the dashboard (organisation setting). Operators recover users' authenticators through it ([accounts runbook](runbooks/accounts.md) §4).
+  - [ ] **Phase 4A, before sign-in is offered** ([phase 4 §18](phases/phase-4-pro-accounts.md#18-phase-4a-implementation-2026-10-16)):
+    - [ ] **"Confirm email" on.** With it off, Auth confirms an email change at once, so an anonymous user's `updateUser({ email })` becomes a permanent account with an address nobody proved (P4-00 finding).
+    - [ ] Secure email change on (both addresses confirm).
+    - [ ] Manual linking on (the Google upgrade keeps the user ID).
+    - [ ] The redirect allow-list holds this origin's `/auth/callback` only. The emails' links open it (P4-23); a redirect missing from the list makes Auth use the Site URL, where the link does nothing.
+    - [ ] The email templates carry the 6-digit code (`supabase/templates/*`), and their links go through `/auth/callback#confirm=…` (P4-23).
+    - [ ] Google provider set up once the OAuth client exists.
+    - [ ] Confirmed on staging that the migration role may update `auth.users` and delete from `auth.users` and `auth.sessions`. The merge, revocation and the password clean-up need this; it is confirmed locally only.
+    - [ ] Rate limits for sign-in and verification reviewed (the local stack raises them for tests).
 - [ ] Realtime: **"Allow public access" disabled.** Private channels only.
 - [ ] Database:
   - [ ] `app_owner` and `app_server` roles created with strong credentials. SSL enforced.
@@ -125,6 +137,7 @@ flowchart LR
   - [ ] **Supabase Auth IP storage (Q-031, RISK-029).** Auth records the client IP of each session (`auth.sessions.ip`) and in its audit log. Apply the owner's decision: privacy notice wording, session time-boxing, or a retention job.
 - [ ] **Egress lists loaded before the environment opens**, then at least weekly: `pnpm egress:load` ([runbook](runbooks/egress-lists.md)). Without a load in the last 14 days, local sharing is off everywhere (03 §3.5).
 - [ ] Edge Function `storage-janitor`: `verify_jwt` disabled **only** because the function checks its own trigger secret. Separate R2 token and database role. Secrets set per environment.
+- [ ] **Billing (Phase 4C), only once a provider is chosen (Q-005) and its adapter exists (P4-13):** the Vault secrets `billing_reconcile_url` and `billing_reconcile_secret`, then `update app.runtime_flags set enabled = true where key = 'billing_reconcile'`. Until then the daily job posts nothing and `/health/cron` reports `billingReconcile: not_required`. The full go-live list (host secrets, the webhook endpoint, Cloudflare, Vault, the sandbox and the real transaction) is in the [billing runbook](runbooks/billing.md) §8.
 - [ ] Backups: daily backups (7 days on Pro). **Point-in-time recovery evaluated before paid launch.** Restore drill on staging before public beta.
 
 ---
@@ -195,7 +208,9 @@ Every command of both jobs passes locally (2026-10-15). The GitHub remote exists
 | Link unlock attempts (Phase 2) | Log event `link.unlock_rate_limited` | 10× baseline |
 | Supabase usage | Supabase dashboard alerts | 80% of MAU, Realtime connections, disk |
 | R2 storage | Cloudflare notifications / daily job | > 20% week-over-week growth |
-| Billing | `billing_events.status = 'failed'` | Any |
+| Extension copies (Phase 4D, P4-15) | `/health/cron` `extensions`: a copy pending for over 6 hours (`stuck`); a failed copy shows as `janitorFailures: failing` for 24 hours ([janitor runbook](runbooks/janitor.md) §7) | Any |
+| Billing webhooks (Phase 4C) | `/health/cron` `billingWebhooks`: an event `failed` for more than an hour; logs `billing.webhook_failed`, `billing.webhook_rejected` (bad signatures) | Any |
+| Billing reconciliation (Phase 4C) | `/health/cron` `billingReconcile` (only where the `billing_reconcile` flag is on): no successful run for 2 days; the `billing-reconcile` heartbeat | Stale |
 
 **Redaction is mandatory** in logs and error monitoring (see [03 §14](03-security-and-network-design.md#14-logging-audit-and-security-monitoring)).
 
@@ -224,23 +239,26 @@ Phase 1 reads these on the server at request time and the root layout passes the
 | `ORIGIN_SHARED_SECRET`, `ORIGIN_SHARED_SECRET_PREVIOUS` | Origin lock |
 | `ALLOW_TEST_CLIENT_IP` | Tests only. **The production boot refuses to start if set**, and also refuses it with `TRUST_PROXY_MODE=cloudflare`. It takes effect only when `APP_ENV` is set explicitly to `local` or `test`. |
 | `DATABASE_URL` | `app_server` through the Supavisor pooler |
-| `SUPABASE_SECRET_KEY` | Optional. Validated when set, but unused (Phases 1 and 2); reserved for planned Auth admin operations. |
+| `SUPABASE_SECRET_KEY` | Optional. Validated when set, but unused by the app through Phase 4: the merge, revocation and deletion work in SQL. Operators use the project's secret key from their own machine for Auth admin calls ([accounts runbook](runbooks/accounts.md) §4), not from the host. |
 | `R2_ACCOUNT_ID`, `R2_BUCKET`, `R2_S3_ENDPOINT`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` | Storage |
 | `NETWORK_KEY_SECRET_CURRENT`, `NETWORK_KEY_SECRET_PREVIOUS`, `NETWORK_KEY_VERSION` | Network keys (DEC-032) |
 | `NETWORK_IPV6_PREFIX_LEN` (default 64) | Local-mode tuning. The large-network cap moved to the runtime flag `network_large_cap` (DV1-5); `NETWORK_PROBE_HOSTS` is not used (no dual-stack probe). |
-| `LINK_PEPPER`, `CODE_PEPPER`, `PEPPER_VERSION`, `LINK_PEPPER_PREVIOUS`, `CODE_PEPPER_PREVIOUS` | Secret hashing for link secrets and short codes (Phase 2): ≥ 32 random characters each, different from each other, **required in staging and production**; `*_PREVIOUS` only during a rotation, with `PEPPER_VERSION` raised by one. `INVITE_PEPPER` arrives in Phase 4. |
+| `LINK_PEPPER`, `CODE_PEPPER`, `PEPPER_VERSION`, `LINK_PEPPER_PREVIOUS`, `CODE_PEPPER_PREVIOUS` | Secret hashing for link secrets and short codes (Phase 2): ≥ 32 random characters each, different from each other, **required in staging and production**; `*_PREVIOUS` only during a rotation, with `PEPPER_VERSION` raised by one. Since Phase 4 `LINK_PEPPER` also protects room links, room invites and merge intents, each domain-separated. **There is no `INVITE_PEPPER`** (DV4-83), though `.env.example` listed one until P4-25. When the previous value may go: [secret rotation](runbooks/secret-rotation.md). |
 | `TURNSTILE_SECRET_KEY` | **Used by the app since Phase 2** (code-guessing escalation, abuse reports; required in staging and production, with the site key). The same secret is also set in the Supabase project's Auth captcha settings, which verify the anonymous sign-in token. |
 | `TURNSTILE_VERIFY_URL` | Tests and local development only: a stand-in for Cloudflare's siteverify. Refused in production builds and deployments. |
 | `TEST_CLIENT_IP_DEFAULT` | Tests and local development only (with `ALLOW_TEST_CLIENT_IP=1`): client IP assumed without `X-Test-Client-IP`. Refused like the override. |
 | `RUNTIME_FLAGS_CACHE_SECONDS` | Kill-switch cache, default 30, at most 300 (tests use 0) |
 | `LOG_LEVEL` | Logging |
 | `SENTRY_DSN` (Phase 6) | Error monitoring |
-| `BILLING_*` (Phase 4) | Billing provider credentials and webhook secret |
+| `BILLING_PROVIDER`, `BILLING_API_KEY`, `BILLING_WEBHOOK_SECRET` (`_PREVIOUS` during a rotation), `BILLING_PRICE_PRO_MONTH`, `BILLING_PRICE_PRO_YEAR` (Phase 4C) | The billing provider: all or none; optional until a provider is chosen (Q-005), otherwise the billing routes answer `503`. Only `fake` exists, and it is refused in production builds and deployments, as is `BILLING_FAKE_API_URL` (tests and local development only). Webhook secrets need at least 32 characters, separate per environment. |
+| `BILLING_RECONCILE_SECRET`, `BILLING_RECONCILE_SECRET_PREVIOUS` (Phase 4C) | Bearer secret of `POST /api/v1/internal/billing/reconcile`; the same value as the Vault secret `billing_reconcile_secret`. At least 32 characters. |
 | `NEXT_SERVER_ACTIONS_ENCRYPTION_KEY` | Only for multi-instance deployments |
 
 Edge Function secrets (Phase 3, `storage-janitor`; [janitor runbook](runbooks/janitor.md) §2): `JANITOR_DATABASE_URL` (`app_janitor`, Supavisor transaction mode), `JANITOR_TRIGGER_SECRET` (`JANITOR_TRIGGER_SECRET_PREVIOUS` during a rotation), `JANITOR_S3_ENDPOINT`, `JANITOR_S3_BUCKET`, `JANITOR_S3_ACCESS_KEY_ID`, `JANITOR_S3_SECRET_ACCESS_KEY`, `JANITOR_DRY_RUN`. The function reads only these names, never the injected `SUPABASE_*` secrets. Supabase still injects them, `SUPABASE_DB_URL` (user `postgres`) included, and the runtime can't remove them (RISK-036).
 
-Supabase Vault (Phase 3): `storage_janitor_url` and `storage_janitor_secret`, created per environment outside migrations (locally by `supabase/seed.sql`).
+Supabase Auth (Phase 4, P4-23): the **SMTP password** (the email provider's API key or SMTP credential) is set only in the project's SMTP settings. The app never has it and no `.env` lists it; rotation is in [`infra/email/README.md`](../infra/email/README.md) §9. The same holds for the **Google OAuth client secret** (4A), set in the project's Google provider settings once the client exists ([secret rotation](runbooks/secret-rotation.md)).
+
+Supabase Vault (Phase 3): `storage_janitor_url` and `storage_janitor_secret`, created per environment outside migrations (locally by `supabase/seed.sql`). Phase 4C: `billing_reconcile_url` (this environment's `/api/v1/internal/billing/reconcile`) and `billing_reconcile_secret`, needed only once billing is live; then turn on the `billing_reconcile` runtime flag.
 
 GitHub (Phase 3, egress refresh): repository variable `EGRESS_REFRESH_ENABLED`; environment secret `EGRESS_LOADER_DATABASE_URL` (`app_egress_loader`) in `staging` and `production`.
 
@@ -275,6 +293,7 @@ All variables are validated with zod at boot (`lib/server/env.ts`, called from `
 | [Incident response (security and availability)](runbooks/incident.md) (written; roles `[OWNER]`) | 3 (before public beta) |
 | [Secret rotation](runbooks/secret-rotation.md) (each secret in [03 §12](03-security-and-network-design.md#12-secrets-and-key-management); written, not rehearsed) | 3 |
 | [Database restore drill](runbooks/restore-drill.md) (written; never run, no hosted project) | 3 |
-| Billing webhook replay and reconciliation | 4 |
-| Account and data deletion requests | 4 |
+| [Billing: webhook replay, reconciliation, support, overrides, going live](runbooks/billing.md) (written, P4-25; not rehearsed: no provider yet, Q-005) | 4 |
+| [Account and data deletion requests](runbooks/account-deletion.md) (written, P4-22; retention of kept records and browsers without an account added in P4-25; not rehearsed, AC-4.7) | 4 |
+| [Accounts: authenticator apps and lost-authenticator recovery, merges, devices](runbooks/accounts.md) (written, P4-24; merge and device support added in P4-25; not rehearsed) | 4 |
 | Workspace suspension and data retention notices | 5 |

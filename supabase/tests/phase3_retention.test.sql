@@ -292,9 +292,13 @@ delete from app.storage_reconcile_runs;
 update app.shares set status = 'deleted', ended_at = now(), end_reason = 'deleted_by_creator' where status in ('claimed');
 update app.runtime_flags set value = '{}'::jsonb where key = 'egress_ranges';
 
+-- Phase 4C (§17.12.3, deviation DV4-35): two billing checks join the shape; with no failed webhook
+-- and billing not live they are ok and not_required, so the Phase 3 expectation is unchanged.
+-- Phase 4D (§17.12.3, P4-15): so does extensions, ok with no extension pending.
 select is(app.cron_health(false),
   '{"status": "degraded", "checks": {"heartbeat": "missing", "janitorBacklog": "ok", "janitorFailures": "ok", "janitorVolume": "ok",
-     "burnFinalize": "ok", "reconcile": "pending", "storageDrift": "pending", "egressLists": "not_required", "jobs": "ok"}}'::jsonb,
+     "burnFinalize": "ok", "reconcile": "pending", "storageDrift": "pending", "egressLists": "not_required", "jobs": "ok",
+     "billingWebhooks": "ok", "billingReconcile": "not_required", "extensions": "ok"}}'::jsonb,
   'before any heartbeat: degraded (heartbeat missing); jobs that have not run yet are pending');
 select app.run_job('cron-heartbeat');
 select is(app.cron_health(false) ->> 'status', 'ok', 'with a fresh heartbeat and nothing due: ok');

@@ -2,7 +2,8 @@
  * The storage-janitor's S3 calls over a signed fetch (phase 3 §17.5, D-8): aws4fetch signs in the
  * Edge Function; nothing else is needed for DeleteObject, PutObject, CopyObject, HeadObject,
  * ListObjectsV2 and the multipart listing. Runtime-agnostic, like janitor-core.ts (no imports, no
- * runtime globals).
+ * runtime globals). CopyObject goes to a hold copy (RISK-031) or, for extend by copy (P4-15), to a
+ * generated key of a longer-lived class; one request copies up to 5 GiB, Pro's largest file.
  *
  * Only single-object DeleteObject is used: DeleteObjects batches wait for R2 to confirm them
  * (RISK-011). Errors carry the HTTP status and S3 error code, never the key.
@@ -24,6 +25,11 @@ const OBJECT_KEY = /^(d7|d30|d90|ws)\/\d{4}\/\d{2}\/\d{2}\/[0-9a-f]{8}-[0-9a-f]{
 
 function assertKey(key: string): void {
   if (!OBJECT_KEY.test(key)) throw new Error("invalid object key");
+}
+
+/** An extension copy's destination: a generated key in d30/ or d90/ (P4-15). */
+function isExtensionKey(key: string): boolean {
+  return OBJECT_KEY.test(key) && (key.startsWith("d30/") || key.startsWith("d90/"));
 }
 
 /** A generated key, or its legal-hold copy hold/<key> (RISK-031). */
@@ -80,10 +86,15 @@ export function createFetchStorage(config: { endpoint: string; bucket: string; f
       );
     },
 
-    /** Copy a held object to hold/<key> (RISK-031), server-side, keeping its stored headers. */
+    /**
+     * Server-side copy keeping the stored headers: a held object to hold/<key> (RISK-031), or an extended
+     * share's object to its new key (P4-15).
+     */
     async copyObject(sourceKey: string, destinationKey: string): Promise<"copied" | "missing"> {
       assertKey(sourceKey);
-      if (destinationKey !== `hold/${sourceKey}`) throw new Error("invalid object key");
+      if (destinationKey !== `hold/${sourceKey}` && !(isExtensionKey(destinationKey) && destinationKey !== sourceKey)) {
+        throw new Error("invalid object key");
+      }
       const response = await config.fetch(objectUrl(destinationKey), {
         method: "PUT",
         headers: {
@@ -97,6 +108,18 @@ export function createFetchStorage(config: { endpoint: string; bucket: string; f
       // CopyObject can report a failure inside a 200 response; only a CopyObjectResult is a copy.
       if (!/<CopyObjectResult[\s>]/.test(text)) throw new StorageError(response.status, tag(text, "Code") ?? "InvalidCopyResult");
       return "copied";
+    },
+
+    /** The object's size (HEAD Content-Length), or null when there is none. */
+    async objectSize(key: string): Promise<number | null> {
+      assertKey(key);
+      const response = await config.fetch(objectUrl(key), { method: "HEAD" });
+      await response.body?.cancel();
+      if (response.status === 404) return null;
+      if (!response.ok) throw new StorageError(response.status, null);
+      const length = response.headers.get("content-length");
+      if (length === null || !/^\d+$/.test(length)) throw new StorageError(response.status, "NoContentLength");
+      return Number(length);
     },
 
     async objectExists(key: string): Promise<boolean> {

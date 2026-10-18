@@ -41,6 +41,15 @@ async function toError(response: Response): Promise<ApiRequestError> {
 export function createApiClient(deps: {
   auth: AuthTokens;
   getDeviceId: () => string | null;
+  /** Phase 4 (§17.5.6): this device was revoked from another one; the runtime signs it out. */
+  onDeviceRevoked?: () => void;
+  /**
+   * Phase 4 (C4-2): the server knows this device under another Auth session of the same user (an
+   * upgrade or an email change issues a new one). Registers again, which rebinds it; true to retry.
+   */
+  recoverDevice?: () => Promise<boolean>;
+  /** P4-24: this session must confirm with the account's authenticator (403 MFA_REQUIRED); the runtime shows that step. */
+  onMfaRequired?: () => void;
   fetch?: typeof fetch;
 }): ApiClient {
   const fetcher = deps.fetch ?? ((input, init) => globalThis.fetch(input, init));
@@ -65,9 +74,16 @@ export function createApiClient(deps: {
         const error = await toError(response.clone());
         if (error.code === "UNAUTHENTICATED") {
           response = await send(method, path, options, await deps.auth.refreshAccessToken());
+        } else if (error.code === "DEVICE_UNKNOWN" && deps.recoverDevice && (await deps.recoverDevice())) {
+          response = await send(method, path, options, await deps.auth.getAccessToken());
         }
       }
-      if (!response.ok) throw await toError(response);
+      if (!response.ok) {
+        const error = await toError(response);
+        if (error.code === "DEVICE_REVOKED") deps.onDeviceRevoked?.();
+        if (error.code === "MFA_REQUIRED") deps.onMfaRequired?.();
+        throw error;
+      }
       if (response.status === 204) return undefined as T;
       const data: unknown = await response.json();
       return options.schema ? options.schema.parse(data) : (data as T);

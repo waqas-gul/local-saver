@@ -52,6 +52,63 @@ describe("createApiClient", () => {
     expect(new Headers(calls[1]?.init.headers).get("authorization")).toBe("Bearer t2");
   });
 
+  // Phase 4A: a new Auth session of the same user (an upgrade, an email change) needs the device
+  // rebound to it; until the runtime has done so, the server answers DEVICE_UNKNOWN.
+  it("re-registers the device once after 401 DEVICE_UNKNOWN and retries", async () => {
+    const fetcher = fakeFetch([json(401, errorBody("DEVICE_UNKNOWN")), json(200, { ok: true })]);
+    const recoverDevice = vi.fn(async () => true);
+    const api = createApiClient({
+      auth: { getAccessToken: async () => "t1", refreshAccessToken: async () => "t2" },
+      getDeviceId: () => "device-1",
+      recoverDevice,
+      fetch: fetcher.fn,
+    });
+    await expect(api.request("GET", "/api/v1/x", { schema: z.object({ ok: z.boolean() }) })).resolves.toEqual({ ok: true });
+    expect(recoverDevice).toHaveBeenCalledTimes(1);
+    expect(fetcher.calls).toHaveLength(2);
+  });
+
+  it("doesn't retry DEVICE_UNKNOWN when the device can't be recovered, or a second time", async () => {
+    const unrecovered = fakeFetch([json(401, errorBody("DEVICE_UNKNOWN"))]);
+    const api = createApiClient({
+      auth: { getAccessToken: async () => "t1", refreshAccessToken: async () => "t2" },
+      getDeviceId: () => "device-1",
+      recoverDevice: async () => false,
+      fetch: unrecovered.fn,
+    });
+    await expect(api.request("GET", "/api/v1/x")).rejects.toMatchObject({ code: "DEVICE_UNKNOWN" });
+    expect(unrecovered.calls).toHaveLength(1);
+
+    const twice = fakeFetch([json(401, errorBody("DEVICE_UNKNOWN")), json(401, errorBody("DEVICE_UNKNOWN"))]);
+    const recoverDevice = vi.fn(async () => true);
+    const again = createApiClient({
+      auth: { getAccessToken: async () => "t1", refreshAccessToken: async () => "t2" },
+      getDeviceId: () => "device-1",
+      recoverDevice,
+      fetch: twice.fn,
+    });
+    await expect(again.request("GET", "/api/v1/x")).rejects.toMatchObject({ code: "DEVICE_UNKNOWN" });
+    expect(recoverDevice).toHaveBeenCalledTimes(1);
+    expect(twice.calls).toHaveLength(2);
+  });
+
+  it("tells the runtime when the session must confirm with its authenticator (P4-24), without retrying", async () => {
+    const fetcher = fakeFetch([json(403, errorBody("MFA_REQUIRED"))]);
+    const onMfaRequired = vi.fn();
+    const onDeviceRevoked = vi.fn();
+    const api = createApiClient({
+      auth: { getAccessToken: async () => "t1", refreshAccessToken: async () => "t2" },
+      getDeviceId: () => "device-1",
+      onMfaRequired,
+      onDeviceRevoked,
+      fetch: fetcher.fn,
+    });
+    await expect(api.request("GET", "/api/v1/x")).rejects.toMatchObject({ status: 403, code: "MFA_REQUIRED" });
+    expect(onMfaRequired).toHaveBeenCalledTimes(1);
+    expect(onDeviceRevoked).not.toHaveBeenCalled();
+    expect(fetcher.calls).toHaveLength(1);
+  });
+
   it("gives up after a second 401", async () => {
     const { api } = client([json(401, errorBody("UNAUTHENTICATED")), json(401, errorBody("UNAUTHENTICATED"))]);
     await expect(api.request("GET", "/api/v1/x")).rejects.toMatchObject({ status: 401, code: "UNAUTHENTICATED" });

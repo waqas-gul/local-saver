@@ -46,6 +46,37 @@ export const VIEWER_STATES = {
   downloadedByYou: { title: "You've already opened this", body: "It could be opened only once, and it's been deleted." },
 } as const;
 
+/** OWNER REVIEW (phase 4 §17.8.3, P4-16): link passwords, for the creator and for the viewer. */
+export const PASSWORD_COPY = {
+  // The creator, in the share-link dialog.
+  protect: "Protect with a password",
+  fieldLabel: "Link password",
+  newPasswordLabel: "New password",
+  rules: "8 to 128 characters. Send it separately from the link.",
+  common: "This is a very common password, one of the first anyone would try.",
+  badge: "Password",
+  set: "Set password",
+  change: "Change password",
+  remove: "Remove password",
+  save: "Save password",
+  cancel: "Cancel",
+  createdHint: "Send the password separately: the link alone won't open the share.",
+  notInPlan: "Passwords on links come with Pro.",
+  invalid: "A password needs 8 to 128 characters.",
+  notActive: "This link has expired or was turned off.",
+  // The viewer, on the share page.
+  promptTitle: "This link needs a password",
+  promptBody: "Ask the person who sent it for the password.",
+  label: "Password",
+  submit: "Open",
+  incorrect: "That password isn't right.",
+  locked: (minutes: number) => `Too many wrong passwords. Try again in ${minutes} ${minutes === 1 ? "minute" : "minutes"}.`,
+  limited: "Too many attempts. Wait a while and try again.",
+  check: "Please complete the check and try again.",
+  busy: "Busy right now. Try again in a moment.",
+  failed: "Something went wrong. Check your connection and try again.",
+};
+
 export const REPORT_CATEGORY_LABELS: Record<ReportCategory, string> = {
   malware: "Malware or a harmful file",
   phishing: "Phishing or a scam",

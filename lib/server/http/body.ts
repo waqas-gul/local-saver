@@ -7,8 +7,11 @@ const DEFAULT_MAX_BYTES = 64 * 1024;
 /**
  * Read the body as UTF-8, counting bytes as they arrive: a chunked body without
  * Content-Length is cut off as soon as it passes the limit instead of being buffered whole.
+ * Webhooks (withWebhook) use it for the raw body their signature covers.
  */
-async function readLimited(request: Request, maxBytes: number): Promise<string> {
+export async function readLimited(request: Request, maxBytes: number): Promise<string> {
+  const declared = Number(request.headers.get("content-length") ?? "0");
+  if (declared > maxBytes) throw new ApiError(413, "PAYLOAD_TOO_LARGE", "Request body is too large");
   if (!request.body) return "";
   const reader = request.body.getReader();
   const chunks: Uint8Array[] = [];
@@ -35,11 +38,7 @@ export async function readJson<T extends z.ZodType>(
   schema: T,
   options: { maxBytes?: number } = {},
 ): Promise<z.infer<T>> {
-  const maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
-  const declared = Number(request.headers.get("content-length") ?? "0");
-  if (declared > maxBytes) throw new ApiError(413, "PAYLOAD_TOO_LARGE", "Request body is too large");
-
-  const text = await readLimited(request, maxBytes);
+  const text = await readLimited(request, options.maxBytes ?? DEFAULT_MAX_BYTES);
 
   let data: unknown;
   try {

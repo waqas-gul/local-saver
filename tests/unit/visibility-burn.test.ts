@@ -84,3 +84,23 @@ describe("shareVisibility for claimed shares", () => {
     expect(shareVisibility(claimed, { ...claimant, deviceId: undefined })).toBe("downloaded_by_other");
   });
 });
+
+describe("shareVisibility for claimed room shares (P4-17, DEC-015)", () => {
+  const ROOM = "33333333-3333-4333-8333-333333333333";
+  const inRoom: VisibleShareFields = { ...claimed, scope: "room", networkSpaceId: null, roomId: ROOM };
+  const member = (context: VisibilityContext): VisibilityContext => ({ ...context, eligibleSpaceIds: [], roomIds: [ROOM] });
+
+  it("shows it to the claimant while they are still a member, from any network", () => {
+    expect(shareVisibility(inRoom, member(claimant))).toBe("visible");
+  });
+
+  it("other members learn it was downloaded; non-members and a removed claimant get the 404", () => {
+    expect(shareVisibility(inRoom, member(neighbour))).toBe("downloaded_by_other");
+    expect(shareVisibility(inRoom, neighbour)).toBe("hidden");
+    expect(shareVisibility(inRoom, { ...claimant, roomIds: [] })).toBe("hidden");
+  });
+
+  it("keeps showing it to its creator, member or not (D-7)", () => {
+    expect(shareVisibility(inRoom, creator)).toBe("visible");
+  });
+});

@@ -42,7 +42,8 @@ export type StoredObject = {
 
 let client: { s3: S3Client; config: R2Config } | undefined;
 
-function storage(env: Env): { s3: S3Client; config: R2Config } {
+/** The one S3 client and its bucket (the multipart calls in multipart.ts share it). */
+export function storage(env: Env): { s3: S3Client; config: R2Config } {
   if (!client) {
     const config = getR2Config(env);
     client = {
@@ -61,7 +62,7 @@ function storage(env: Env): { s3: S3Client; config: R2Config } {
   return client;
 }
 
-function assertKey(key: string): void {
+export function assertKey(key: string): void {
   if (!isValidObjectKey(key)) throw new Error("invalid object key");
 }
 

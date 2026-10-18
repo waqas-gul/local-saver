@@ -10,15 +10,26 @@
  * checked here a third time. Logs carry IDs, counts and key classes only: never full keys, file
  * names, URLs or secrets.
  *
+ * Multipart uploads (Phase 4, P4-14): a row may carry the upload ID of a multipart upload that may still
+ * be open; it is aborted before the key is deleted, and such a row never gets a tombstone (no PUT URL
+ * exists for a multipart file's key). Aborting is destructive, so the web tier leaves it to the janitor.
+ *
  * Legal holds (D-2, RISK-031): R2's lifecycle rules delete d7/, d30/ and d90/ objects at their class
  * period + 1 day after upload, held or not. Each run first copies held objects to hold/<key>,
  * which no rule covers (app.janitor_claim_hold_copies); after a release, deleting the row deletes
  * the copy too. Copies are made in dry runs as well: a copy deletes nothing.
+ *
+ * Extend by copy (Phase 4, P4-15, DEC-010): after its deletions, a run copies extended shares' objects to
+ * their new keys in a longer-lived class (app.janitor_claim_extension_copies), in waves of `concurrency`
+ * within the time budget, and checks each copy's size before recording it. The database swaps a share's
+ * keys when its last copy is recorded and queues the old keys through the outbox, so deleting them stays
+ * on the path above, guard rails and all. Copies are made in dry runs too.
  */
 
 export type Mode = "delete" | "reconcile";
 export type Outcome = "deleted" | "tombstoned" | "failed" | "dry_run";
 export type HoldCopyOutcome = "copied" | "unavailable" | "failed";
+export type ExtensionCopyOutcome = "copied" | "failed";
 type Counts = Record<string, number | string | boolean | null>;
 
 export type ClaimedDeletion = {
@@ -33,6 +44,11 @@ export type ClaimedDeletion = {
   attempts: number;
   /** Set when a released hold left a copy (hold/<objectKey>): delete it with the original. */
   holdCopyKey: string | null;
+  /**
+   * Phase 4 (P4-14): set when the key's multipart upload may still be open. It is aborted first (a 404
+   * means it is already gone), so no part can be added or completed, then the key is deleted. Never logged.
+   */
+  multipartUploadId?: string;
 };
 
 /** A held row whose object must be copied out of the lifecycle rules' reach (RISK-031). */
@@ -46,6 +62,18 @@ export type ClaimedHoldCopy = {
   attempts: number;
 };
 
+/** An extended share's object to copy to its new key in a longer-lived class (P4-15). */
+export type ClaimedExtensionCopy = {
+  id: string;
+  /** Null when a guard rail refused the row: it must not be acted on. */
+  oldKey: string | null;
+  newKey: string | null;
+  /** The file's size: the copy must have exactly this many bytes. */
+  sizeBytes: number | null;
+  refused: string | null;
+  attempts: number;
+};
+
 export type ListedObject = { key: string; lastModified: Date };
 export type PageResult = { listed: number; orphansQueued: number; unknownKeys: number; missingObjects: number; holdCopies: number };
 
@@ -55,6 +83,9 @@ export interface JanitorDb {
   finishDeletion(id: string, outcome: Outcome, error?: string | null): Promise<boolean>;
   claimHoldCopies(limit: number): Promise<ClaimedHoldCopy[]>;
   finishHoldCopy(id: string, outcome: HoldCopyOutcome, error?: string | null): Promise<boolean>;
+  claimExtensionCopies(limit: number): Promise<ClaimedExtensionCopy[]>;
+  /** copied, swapped (that was the share's last copy), failed, extension_failed (the fifth failure) or stale. */
+  finishExtensionCopy(id: string, outcome: ExtensionCopyOutcome, error?: string | null): Promise<string>;
   recordRun(mode: Mode, ok: boolean, result: Counts, error?: string | null): Promise<void>;
   reconcileClaim(): Promise<{ runId: string; cursor: string | null; startedAt: Date } | null>;
   reconcilePage(runId: string, keys: ListedObject[], rangeStart: string | null, nextCursor: string | null, done: boolean): Promise<PageResult>;
@@ -67,9 +98,14 @@ export interface JanitorStorage {
   deleteObject(key: string): Promise<void>;
   /** Unconditional empty write that keeps the key taken (review M1). */
   putTombstone(key: string): Promise<void>;
-  /** Server-side copy within the bucket, stored headers kept. "missing" when the source is gone. */
+  /**
+   * Server-side copy within the bucket, stored headers kept: to hold/<key>, or (P4-15) to a generated key of
+   * a longer-lived class. "missing" when the source is gone.
+   */
   copyObject(sourceKey: string, destinationKey: string): Promise<"copied" | "missing">;
   objectExists(key: string): Promise<boolean>;
+  /** HEAD: the object's size in bytes, or null when there is none. */
+  objectSize(key: string): Promise<number | null>;
   listObjects(startAfter: string | null, maxKeys: number): Promise<{ keys: ListedObject[]; truncated: boolean }>;
   listMultipartUploads(): Promise<{ key: string; uploadId: string; initiated: Date }[]>;
   abortMultipartUpload(key: string, uploadId: string): Promise<void>;
@@ -123,6 +159,11 @@ export function holdCopyKey(key: string): string {
   return HOLD_PREFIX + key;
 }
 
+/** An extension copy's destination: a generated key of a class longer-lived than d7 (P4-15). */
+export function isValidExtensionKey(key: string): boolean {
+  return isValidObjectKey(key) && (key.startsWith("d30/") || key.startsWith("d90/"));
+}
+
 /** The retention class of a key, the only part of a key that is logged. */
 function keyClass(key: string | null): string | null {
   return key?.split("/")[0] ?? null;
@@ -159,6 +200,11 @@ type DeleteSummary = {
   holdCopied: number;
   holdUnavailable: number;
   holdCopyFailed: number;
+  extensionClaimed: number;
+  extensionCopied: number;
+  extensionSwapped: number;
+  extensionCopyFailed: number;
+  extensionFailed: number;
 };
 
 async function handleRow(row: ClaimedDeletion, db: JanitorDb, storage: JanitorStorage, log: LogFn, options: JanitorOptions, s: DeleteSummary) {
@@ -174,7 +220,13 @@ async function handleRow(row: ClaimedDeletion, db: JanitorDb, storage: JanitorSt
     return;
   }
   const hold = row.holdUntil !== null;
-  const fields = { objectDeletionId: row.id, keyClass: keyClass(row.objectKey), reason: row.reason, holdCopy: row.holdCopyKey !== null };
+  const fields = {
+    objectDeletionId: row.id,
+    keyClass: keyClass(row.objectKey),
+    reason: row.reason,
+    holdCopy: row.holdCopyKey !== null,
+    ...(row.multipartUploadId ? { multipart: true } : {}),
+  };
   if (options.dryRun) {
     log("info", hold ? "janitor.would_tombstone" : "janitor.would_delete", fields);
     await db.finishDeletion(row.id, "dry_run");
@@ -182,6 +234,8 @@ async function handleRow(row: ClaimedDeletion, db: JanitorDb, storage: JanitorSt
     return;
   }
   try {
+    // An open multipart upload goes first: once aborted, no part URL can add to it and it can't be completed.
+    if (row.multipartUploadId) await storage.abortMultipartUpload(row.objectKey, row.multipartUploadId);
     if (hold) {
       if (!row.tombstoned) await storage.putTombstone(row.objectKey);
     } else {
@@ -240,6 +294,48 @@ async function handleHoldCopy(row: ClaimedHoldCopy, db: JanitorDb, storage: Jani
   }
 }
 
+async function handleExtensionCopy(row: ClaimedExtensionCopy, db: JanitorDb, storage: JanitorStorage, log: LogFn, s: DeleteSummary) {
+  if (row.refused !== null || row.oldKey === null || row.newKey === null || row.sizeBytes === null) {
+    s.refused++;
+    log("error", "janitor.guard_refused", { extensionCopyId: row.id, guard: row.refused ?? "no_key", reason: "extension" });
+    return;
+  }
+  if (!isValidObjectKey(row.oldKey) || !isValidExtensionKey(row.newKey) || row.oldKey === row.newKey) {
+    s.refused++;
+    log("error", "janitor.guard_refused", { extensionCopyId: row.id, guard: "key_format", reason: "extension" });
+    await db.finishExtensionCopy(row.id, "failed", "guard:key_format");
+    return;
+  }
+  const fields = { extensionCopyId: row.id, from: keyClass(row.oldKey), to: keyClass(row.newKey) };
+  let failure: string | null = null;
+  try {
+    if ((await storage.copyObject(row.oldKey, row.newKey)) === "missing") failure = "source_missing";
+    // Only a copy with exactly the file's bytes counts: the swap points the file at it.
+    else if ((await storage.objectSize(row.newKey)) !== row.sizeBytes) failure = "size_mismatch";
+  } catch (error) {
+    failure = errorLabel(error);
+  }
+  if (failure !== null) {
+    s.extensionCopyFailed++;
+    const result = await db.finishExtensionCopy(row.id, "failed", failure);
+    // A verified file of an open share has lost its object: the operator must know.
+    log(failure === "source_missing" ? "error" : "warn", "janitor.extension_copy_failed", { ...fields, attempts: row.attempts + 1, error: failure });
+    if (result === "extension_failed") {
+      s.extensionFailed++;
+      log("error", "janitor.extension_failed", { ...fields, attempts: row.attempts + 1, error: failure });
+    }
+    return;
+  }
+  const result = await db.finishExtensionCopy(row.id, "copied");
+  s.extensionCopied++;
+  if (result === "swapped") s.extensionSwapped++;
+  log("info", result === "swapped" ? "janitor.extension_swapped" : "janitor.extension_copied", {
+    ...fields,
+    // Its extension ended meanwhile; the database queued the new key again.
+    ...(result === "stale" ? { stale: true } : {}),
+  });
+}
+
 async function runDelete(db: JanitorDb, storage: JanitorStorage, log: LogFn, options: JanitorOptions): Promise<DeleteSummary> {
   const s: DeleteSummary = {
     claimed: 0,
@@ -253,9 +349,14 @@ async function runDelete(db: JanitorDb, storage: JanitorStorage, log: LogFn, opt
     holdCopied: 0,
     holdUnavailable: 0,
     holdCopyFailed: 0,
+    extensionClaimed: 0,
+    extensionCopied: 0,
+    extensionSwapped: 0,
+    extensionCopyFailed: 0,
+    extensionFailed: 0,
   };
   const start = options.now();
-  const left = () => options.maxRows - s.claimed - s.holdClaimed;
+  const left = () => options.maxRows - s.claimed - s.holdClaimed - s.extensionClaimed;
   // Held objects first: until copied, R2's lifecycle rules may delete a takedown's evidence (RISK-031).
   while (left() > 0 && options.now() - start < options.timeBudgetMs) {
     const rows = await db.claimHoldCopies(Math.min(options.batchSize, left()));
@@ -269,6 +370,14 @@ async function runDelete(db: JanitorDb, storage: JanitorStorage, log: LogFn, opt
     s.claimed += rows.length;
     s.batches++;
     await inParallel(rows, options.concurrency, (row) => handleRow(row, db, storage, log, options, s));
+  }
+  // Extension copies last (P4-15): an ended share's objects should go first. One wave of `concurrency`
+  // copies at a time, so a run never starts more copies (up to 5 GiB each) than it can finish in time.
+  while (left() > 0 && options.now() - start < options.timeBudgetMs) {
+    const rows = await db.claimExtensionCopies(Math.min(options.concurrency, left()));
+    if (rows.length === 0) break;
+    s.extensionClaimed += rows.length;
+    await inParallel(rows, options.concurrency, (row) => handleExtensionCopy(row, db, storage, log, s));
   }
   return s;
 }
@@ -286,7 +395,9 @@ type ReconcileSummary = {
 };
 
 async function reconcileMultipart(db: JanitorDb, storage: JanitorStorage, log: LogFn, options: JanitorOptions, runId: string) {
-  // No multipart uploads exist before Phase 4 (C-5): report them, abort stale ones like the R2 rule.
+  // C-5, and since Phase 4 (P4-14) the backstop for multipart uploads: one older than the 24-hour
+  // upload deadline is abandoned (the outbox normally aborts it first), and is aborted like the R2 rule
+  // would. Younger ones are left alone: they may still finish.
   const uploads = await storage.listMultipartUploads();
   let aborted = 0;
   for (const upload of uploads) {
@@ -294,7 +405,9 @@ async function reconcileMultipart(db: JanitorDb, storage: JanitorStorage, log: L
     if (!options.dryRun) await storage.abortMultipartUpload(upload.key, upload.uploadId);
     aborted++;
   }
-  if (uploads.length > 0) log("warn", "reconcile.multipart_uploads", { inProgress: uploads.length, aborted, dryRun: options.dryRun });
+  if (uploads.length > 0) {
+    log(aborted > 0 ? "warn" : "info", "reconcile.multipart_uploads", { inProgress: uploads.length, aborted, dryRun: options.dryRun });
+  }
   await db.reconcileNote(runId, { multipartInProgress: uploads.length, multipartAborted: options.dryRun ? 0 : aborted });
 }
 
@@ -456,7 +569,7 @@ export function createJanitorDb(query: QueryFn): JanitorDb {
     },
     async claimDeletions(limit) {
       const rows = await query(
-        "select id::text as id, object_key, reason, hold_until, tombstoned, refused, attempts, hold_copy_key from app.janitor_claim_deletions($1::integer)",
+        "select id::text as id, object_key, reason, hold_until, tombstoned, refused, attempts, hold_copy_key, multipart_upload_id from app.janitor_claim_deletions($1::integer)",
         [limit],
       );
       return rows.map((r) => ({
@@ -468,6 +581,7 @@ export function createJanitorDb(query: QueryFn): JanitorDb {
         refused: (r.refused as string | null) ?? null,
         attempts: Number(r.attempts ?? 0),
         holdCopyKey: (r.hold_copy_key as string | null) ?? null,
+        ...(typeof r.multipart_upload_id === "string" && r.multipart_upload_id !== "" ? { multipartUploadId: r.multipart_upload_id } : {}),
       }));
     },
     async finishDeletion(id, outcome, error = null) {
@@ -487,6 +601,25 @@ export function createJanitorDb(query: QueryFn): JanitorDb {
     async finishHoldCopy(id, outcome, error = null) {
       const rows = await query("select app.janitor_finish_hold_copy($1::bigint, $2, $3) as ok", [id, outcome, error]);
       return rows[0]?.ok === true;
+    },
+    async claimExtensionCopies(limit) {
+      const rows = await query(
+        "select id::text as id, old_key, new_key, size_bytes, refused, attempts from app.janitor_claim_extension_copies($1::integer)",
+        [limit],
+      );
+      return rows.map((r) => ({
+        id: String(r.id),
+        oldKey: (r.old_key as string | null) ?? null,
+        newKey: (r.new_key as string | null) ?? null,
+        // bigint arrives as a string; files are at most 5 GiB, well within a double.
+        sizeBytes: r.size_bytes === null || r.size_bytes === undefined ? null : Number(r.size_bytes),
+        refused: (r.refused as string | null) ?? null,
+        attempts: Number(r.attempts ?? 0),
+      }));
+    },
+    async finishExtensionCopy(id, outcome, error = null) {
+      const rows = await query("select app.janitor_finish_extension_copy($1::bigint, $2, $3) as result", [id, outcome, error]);
+      return String(rows[0]?.result ?? "stale");
     },
     async recordRun(mode, ok, result, error = null) {
       await query("select app.janitor_record_run($1, $2::boolean, $3::text::jsonb, $4)", [mode, ok, JSON.stringify(result), error]);

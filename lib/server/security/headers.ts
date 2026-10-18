@@ -70,8 +70,9 @@ export function buildDocumentCsp(options: CspOptions): string {
   return directives.join("; ");
 }
 
-const NO_REFERRER_ROUTES = /^\/(s|j|c)(\/|$)/;
-const NOINDEX_ROUTES = /^\/(s|j|c|rooms|api)(\/|$)/;
+// Phase 4: the sign-in pages too. The callback URL carries a one-time PKCE code (§17.5.2).
+const NO_REFERRER_ROUTES = /^\/(s|j|c|login|auth)(\/|$)/;
+const NOINDEX_ROUTES = /^\/(s|j|c|rooms|api|login|auth)(\/|$)/;
 
 export function isApiPath(pathname: string): boolean {
   return pathname === "/api" || pathname.startsWith("/api/");

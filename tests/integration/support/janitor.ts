@@ -100,6 +100,14 @@ export function sdkStorage(endpoint: string = stack().storage.endpoint): Janitor
         return fail(error);
       }
     },
+    async objectSize(key) {
+      try {
+        return (await s3.send(new HeadObjectCommand({ Bucket: bucket, Key: key }))).ContentLength ?? null;
+      } catch (error) {
+        if ((error as { $metadata?: { httpStatusCode?: number } }).$metadata?.httpStatusCode === 404) return null;
+        return fail(error);
+      }
+    },
     async listObjects(startAfter, maxKeys) {
       const page = await s3.send(new ListObjectsV2Command({ Bucket: bucket, MaxKeys: maxKeys, StartAfter: startAfter ?? undefined })).catch(fail);
       return {

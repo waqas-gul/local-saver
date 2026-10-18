@@ -120,6 +120,19 @@ describe("securityHeaders", () => {
     expect(securityHeaders(path, { https: false })["Cache-Control"]).toBe("no-store");
   });
 
+  // Phase 4 (§17.5.2): the callback URL carries a one-time PKCE code; the sign-in pages are private.
+  it.each(["/login", "/auth/callback"])("keeps %s out of referrers, caches and search engines", (path) => {
+    const h = securityHeaders(path, { https: false });
+    expect(h["Referrer-Policy"]).toBe("no-referrer");
+    expect(h["Cache-Control"]).toBe("no-store");
+    expect(h["X-Robots-Tag"]).toBe("noindex, nofollow");
+  });
+
+  it("does not treat look-alike paths as sign-in routes", () => {
+    expect(securityHeaders("/loginx", { https: false })["Referrer-Policy"]).toBe("strict-origin-when-cross-origin");
+    expect(securityHeaders("/authors", { https: false })["Cache-Control"]).toBeUndefined();
+  });
+
   it("does not treat look-alike paths as share routes", () => {
     expect(securityHeaders("/settings", { https: false })["Referrer-Policy"]).toBe("strict-origin-when-cross-origin");
     expect(securityHeaders("/sitemap", { https: false })["Cache-Control"]).toBeUndefined();

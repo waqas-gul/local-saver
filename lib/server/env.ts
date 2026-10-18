@@ -8,6 +8,10 @@ import { z } from "zod";
  * local-only default test IP, and requires every Phase 1 service when deployed.
  * Phase 2 adds the versioned link and code peppers (03 §12) and the Turnstile secret, which the
  * server now uses to verify challenges (code-guessing escalation, abuse reports; DV2-6).
+ * Phase 4C adds billing (phase 4 §17.7.2): the provider, its API key, webhook secrets and price IDs,
+ * and the reconcile route's bearer secret. Billing is optional everywhere until a provider is chosen
+ * (Q-005); without it the billing routes answer 503. The only provider so far is the fake one, for
+ * tests and local development, and it is refused in production builds and deployments.
  */
 
 const APP_ENVS = ["local", "test", "staging", "production"] as const;
@@ -16,6 +20,8 @@ const LOCAL_DEFAULT_ORIGIN = "http://localhost:3000";
 const MIN_SECRET_LENGTH = 32;
 const PLACEHOLDER = /change[-_ ]?me|placeholder|your[-_]|example|xxxx|<.*>/i;
 const TURNSTILE_SITEVERIFY = "https://challenges.cloudflare.com/turnstile/v0/siteverify";
+/** Billing providers with an adapter (lib/server/billing/providers). The real one comes with P4-13. */
+const BILLING_PROVIDERS = ["fake"] as const;
 
 const optionalString = z
   .string()
@@ -71,6 +77,21 @@ const schema = z.object({
   TURNSTILE_SECRET_KEY: optionalString,
   /** Tests and local development only: a stand-in for Cloudflare's siteverify endpoint. */
   TURNSTILE_VERIFY_URL: optionalUrl,
+
+  /** Phase 4C billing (§17.7.2). All of the provider's settings, or none. */
+  BILLING_PROVIDER: optionalString.pipe(z.enum(BILLING_PROVIDERS).optional()),
+  BILLING_API_KEY: optionalString,
+  /** HMAC key for webhook signatures; PREVIOUS only during rotation. */
+  BILLING_WEBHOOK_SECRET: optionalString,
+  BILLING_WEBHOOK_SECRET_PREVIOUS: optionalString,
+  /** The provider's price IDs for Pro, monthly and yearly. */
+  BILLING_PRICE_PRO_MONTH: optionalString,
+  BILLING_PRICE_PRO_YEAR: optionalString,
+  /** Tests and local development only: where the fake provider listens. */
+  BILLING_FAKE_API_URL: optionalUrl,
+  /** Bearer secret of POST /api/v1/internal/billing/reconcile (pg_net posts it from Vault). */
+  BILLING_RECONCILE_SECRET: optionalString,
+  BILLING_RECONCILE_SECRET_PREVIOUS: optionalString,
 });
 
 type RawEnv = z.infer<typeof schema>;
@@ -98,6 +119,20 @@ export type Env = RawEnv & {
   codePeppers: VersionedSecret[];
   /** Server-side Turnstile verification; null when no secret is configured. */
   turnstile: { secretKey: string; verifyUrl: string } | null;
+  /** The billing provider's settings; null when billing isn't configured here (503 on billing routes). */
+  billing: BillingConfig | null;
+  /** The reconcile route's bearer secrets, current first. Empty when not configured. */
+  billingReconcileSecrets: string[];
+};
+
+export type BillingConfig = {
+  provider: (typeof BILLING_PROVIDERS)[number];
+  apiKey: string;
+  /** Webhook signing secrets, current first (rotation). */
+  webhookSecrets: string[];
+  prices: { month: string; year: string };
+  /** The fake provider's base URL (tests and local development only). */
+  fakeApiUrl: string | null;
 };
 
 export type VersionedSecret = { version: number; secret: string };
@@ -127,6 +162,11 @@ const SECRETS: (keyof RawEnv)[] = [
   "CODE_PEPPER",
   "CODE_PEPPER_PREVIOUS",
   "TURNSTILE_SECRET_KEY",
+  "BILLING_API_KEY",
+  "BILLING_WEBHOOK_SECRET",
+  "BILLING_WEBHOOK_SECRET_PREVIOUS",
+  "BILLING_RECONCILE_SECRET",
+  "BILLING_RECONCILE_SECRET_PREVIOUS",
 ];
 
 /** Secrets that must be long random values wherever they are set. */
@@ -139,7 +179,13 @@ const MIN_LENGTH_SECRETS = [
   "LINK_PEPPER_PREVIOUS",
   "CODE_PEPPER",
   "CODE_PEPPER_PREVIOUS",
+  "BILLING_WEBHOOK_SECRET",
+  "BILLING_WEBHOOK_SECRET_PREVIOUS",
+  "BILLING_RECONCILE_SECRET",
+  "BILLING_RECONCILE_SECRET_PREVIOUS",
 ] as const;
+
+const BILLING_REQUIRED: (keyof RawEnv)[] = ["BILLING_API_KEY", "BILLING_WEBHOOK_SECRET", "BILLING_PRICE_PRO_MONTH", "BILLING_PRICE_PRO_YEAR"];
 
 /** Everything Phase 1 needs to serve local sharing; required in staging and production. */
 const REQUIRED_WHEN_DEPLOYED: (keyof RawEnv)[] = [
@@ -267,6 +313,14 @@ export function parseEnv(source: Record<string, string | undefined>): Env {
   if (raw.TURNSTILE_VERIFY_URL !== undefined && (raw.NODE_ENV === "production" || isDeployed)) {
     issues.push("TURNSTILE_VERIFY_URL: tests and local development only (refused in production builds and deployments)");
   }
+
+  const billing = billingConfig(issues, raw, isDeployed);
+  if (raw.BILLING_RECONCILE_SECRET_PREVIOUS && !raw.BILLING_RECONCILE_SECRET) {
+    issues.push("BILLING_RECONCILE_SECRET: required when BILLING_RECONCILE_SECRET_PREVIOUS is set");
+  }
+  const billingReconcileSecrets = [raw.BILLING_RECONCILE_SECRET, raw.BILLING_RECONCILE_SECRET_PREVIOUS].filter(
+    (s): s is string => typeof s === "string",
+  );
   if ((raw.TRUST_PROXY_MODE === "cloudflare" || isDeployed) && !raw.ORIGIN_SHARED_SECRET) {
     issues.push("ORIGIN_SHARED_SECRET: required in staging, production and whenever TRUST_PROXY_MODE=cloudflare (origin lock, DEC-004)");
   }
@@ -334,6 +388,38 @@ export function parseEnv(source: Record<string, string | undefined>): Env {
     turnstile: raw.TURNSTILE_SECRET_KEY
       ? { secretKey: raw.TURNSTILE_SECRET_KEY, verifyUrl: raw.TURNSTILE_VERIFY_URL ?? TURNSTILE_SITEVERIFY }
       : null,
+    billing,
+    billingReconcileSecrets,
+  };
+}
+
+/** Billing settings (§17.7.2): every provider setting or none; the fake provider only in tests and local development. */
+function billingConfig(issues: string[], raw: RawEnv, isDeployed: boolean): BillingConfig | null {
+  const fakeOnly = raw.NODE_ENV === "production" || isDeployed;
+  if (raw.BILLING_FAKE_API_URL !== undefined && fakeOnly) {
+    issues.push("BILLING_FAKE_API_URL: tests and local development only (refused in production builds and deployments)");
+  }
+  if (!raw.BILLING_PROVIDER) {
+    const stray = [...BILLING_REQUIRED, "BILLING_WEBHOOK_SECRET_PREVIOUS" as const].filter((k) => raw[k] !== undefined);
+    if (stray.length > 0) issues.push(`BILLING_PROVIDER: required when ${stray.join(", ")} is set`);
+    return null;
+  }
+  const missing = BILLING_REQUIRED.filter((k) => raw[k] === undefined);
+  if (missing.length > 0) issues.push(`Billing: set all of its variables or none (missing ${missing.join(", ")})`);
+  if (raw.BILLING_PROVIDER === "fake") {
+    if (fakeOnly) issues.push("BILLING_PROVIDER: the fake provider is for tests and local development only (refused in production builds and deployments)");
+    if (raw.BILLING_FAKE_API_URL === undefined) issues.push("BILLING_FAKE_API_URL: required with BILLING_PROVIDER=fake");
+  }
+  if (raw.BILLING_PRICE_PRO_MONTH && raw.BILLING_PRICE_PRO_MONTH === raw.BILLING_PRICE_PRO_YEAR) {
+    issues.push("BILLING_PRICE_PRO_YEAR: must differ from BILLING_PRICE_PRO_MONTH");
+  }
+  if (missing.length > 0) return null;
+  return {
+    provider: raw.BILLING_PROVIDER,
+    apiKey: raw.BILLING_API_KEY as string,
+    webhookSecrets: [raw.BILLING_WEBHOOK_SECRET as string, raw.BILLING_WEBHOOK_SECRET_PREVIOUS].filter((s): s is string => typeof s === "string"),
+    prices: { month: raw.BILLING_PRICE_PRO_MONTH as string, year: raw.BILLING_PRICE_PRO_YEAR as string },
+    fakeApiUrl: raw.BILLING_FAKE_API_URL ?? null,
   };
 }
 

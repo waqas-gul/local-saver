@@ -6,14 +6,14 @@ export const metadata: Metadata = { title: "Report abuse (draft) · Local Saver"
 
 export default function ReportPage() {
   return (
-    <LegalPage title="Report abuse" updated="15 October 2026">
+    <LegalPage title="Report abuse" updated="18 October 2026">
       <p>
         If something shared with Local Saver breaks the law or our Acceptable Use Policy, tell us. If someone is in
         immediate danger, contact your local emergency services first.
       </p>
       <h2>How to report</h2>
       <ul>
-        <li>Opened it from a link or a share code? Press <strong>Report</strong> on that page.</li>
+        <li>Opened it from a link, a room link or a share code? Press <strong>Report</strong> on that page.</li>
         <li>Seeing it on your network? Press <strong>Report</strong> on the post.</li>
         <li>Have a link but don&apos;t want to look at it? Paste it below. It opens straight into the report form.</li>
       </ul>

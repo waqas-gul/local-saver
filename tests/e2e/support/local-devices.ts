@@ -119,7 +119,11 @@ export async function expectPhoneLayout(page: Page) {
     header.getByText("Local Saver", { exact: true }),
     header.getByRole("link", { name: "This network" }),
     header.getByRole("link", { name: "My uploads" }),
+    // Phase 4D (P4-17): the Rooms tab.
+    header.getByRole("link", { name: "Rooms" }),
     page.getByTestId("device-label"),
+    // Phase 4: the header's sign-in / account link.
+    page.getByTestId("account-link"),
     page.getByTestId("network-line"),
     page.getByTestId("audience-line"),
   ];

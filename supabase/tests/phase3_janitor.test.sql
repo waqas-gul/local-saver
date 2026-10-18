@@ -39,9 +39,10 @@ select is(
 select is(
   (select array_agg(p.proname::text order by p.proname) from pg_proc p join pg_namespace n on n.oid = p.pronamespace
     where n.nspname = 'app' and has_function_privilege('app_janitor', p.oid, 'EXECUTE')),
-  array['janitor_begin_run', 'janitor_claim_deletions', 'janitor_claim_hold_copies', 'janitor_finish_deletion',
-        'janitor_finish_hold_copy', 'janitor_reconcile_claim', 'janitor_reconcile_note', 'janitor_reconcile_page',
-        'janitor_reconcile_release', 'janitor_record_run'],
+  -- Phase 4D (§17.12.3, P4-15): the extension copies' claim and finish join the list.
+  array['janitor_begin_run', 'janitor_claim_deletions', 'janitor_claim_extension_copies', 'janitor_claim_hold_copies',
+        'janitor_finish_deletion', 'janitor_finish_extension_copy', 'janitor_finish_hold_copy', 'janitor_reconcile_claim',
+        'janitor_reconcile_note', 'janitor_reconcile_page', 'janitor_reconcile_release', 'janitor_record_run'],
   'the janitor role may run exactly the janitor functions');
 select is(
   (select count(*)::int from pg_proc p join pg_namespace n on n.oid = p.pronamespace
@@ -236,8 +237,9 @@ insert into app.object_deletions (object_key, reason, source_file_id) values
   ('d7/2026/10/16/f4000000-0000-4000-8000-000000000003', 'orphan', null),
   ('d7/2026/10/16/------------------------------------', 'orphan', null);
 
+-- Phase 4 (P4-14) appends multipart_upload_id to the claim's columns; nothing here uses it.
 create temp table jc (step text, id bigint, object_key text, reason text, hold_until timestamptz, tombstoned boolean, refused text,
-                      attempts int, hold_copy_key text) on commit drop;
+                      attempts int, hold_copy_key text, multipart_upload_id text) on commit drop;
 create temp table jr (step text, result jsonb) on commit drop;
 grant select, insert on jc, jr to app_janitor;
 grant app_janitor to current_user;

@@ -1,6 +1,6 @@
 "use client";
 
-import { Copy, Download, Eye, FileText, Flag, Link2, Pencil, Trash2 } from "lucide-react";
+import { CalendarPlus, Copy, Download, Eye, FileText, Flag, Link2, Pencil, Trash2 } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -17,7 +17,8 @@ import { Textarea } from "@/components/ui/textarea";
 import type { FileDto, ShareDto } from "@/lib/shared/api/schemas";
 import { BurnConfirmDialog } from "../burn/burn-confirm-dialog";
 import { BURN, burnErrorText, formatClock } from "../burn/copy";
-import { RISK_LABELS, RISK_WARNING } from "./copy";
+import { ROOM_COPY } from "../room/copy";
+import { EXTEND_COPY, RISK_LABELS, RISK_WARNING } from "./copy";
 import { expiresIn, formatBytes, timeAgo } from "./format";
 import { LinkedText } from "./linked-text";
 
@@ -30,6 +31,14 @@ import { LinkedText } from "./linked-text";
  * it always needs a confirmation first. The claimant then sees how long it stays theirs, what is
  * left and "I've got it"; the creator sees that it was opened. A revealed text lives only in this
  * component's state: never in the query cache, and never fetched again on remount.
+ *
+ * Extend (Phase 4, P4-15): the creator may keep the share longer when it can be extended and the plan has it
+ * (the container passes onExtend only then); while its files are copied, and after a failed extension, the
+ * card says so.
+ *
+ * Rooms (Phase 4, P4-17): a room share shows its room outside the room's page (My uploads); in a room, its owner may
+ * delete anyone's share (canDelete), and the container offers a link only when the room allows it. The server
+ * decides each of these again.
  */
 
 export type ShareActions = {
@@ -91,6 +100,9 @@ export function ShareCard({
   renderPreview,
   onShareByLink,
   onReport,
+  onExtend,
+  canDelete = share.isMine,
+  showRoom = true,
 }: {
   share: ShareDto;
   actions: ShareActions;
@@ -99,6 +111,12 @@ export function ShareCard({
   onShareByLink?: () => void;
   /** Everyone else (Phase 2): report the share. */
   onReport?: () => void;
+  /** Creator only (Phase 4, P4-15): keep the share longer. Omitted when the plan doesn't have it. */
+  onExtend?: () => void;
+  /** Phase 4 (P4-17): the creator, or the owner of the share's room. */
+  canDelete?: boolean;
+  /** Phase 4 (P4-17): name the share's room (not on the room's own page). */
+  showRoom?: boolean;
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(share.text?.content ?? "");
@@ -170,6 +188,16 @@ export function ShareCard({
             </Badge>
           )}
           {share.scope === "link_only" && <Badge variant="outline">Link only</Badge>}
+          {share.room && showRoom && (
+            <Badge variant="outline" className="max-w-40 truncate" data-testid="room-badge">
+              {ROOM_COPY.roomBadge(share.room.label)}
+            </Badge>
+          )}
+          {share.isMine && share.expiry?.extensionPending && (
+            <Badge variant="outline" data-testid="extension-pending">
+              {EXTEND_COPY.pendingBadge}
+            </Badge>
+          )}
           <Badge variant="secondary">{expiresIn(share.expiresAt)}</Badge>
         </span>
       </CardHeader>
@@ -239,6 +267,11 @@ export function ShareCard({
             )}
           </div>
         )}
+        {share.isMine && share.expiry?.extensionFailed && (
+          <p className="text-xs text-destructive" data-testid="extension-failed">
+            {EXTEND_COPY.failed}
+          </p>
+        )}
         {burn?.claimed && share.isMine && burn.availableUntil && (
           <p className="text-xs text-muted-foreground" data-testid="burn-opened">
             {BURN.openedBySomeone(formatClock(burn.availableUntil))}
@@ -281,7 +314,13 @@ export function ShareCard({
               Share link
             </Button>
           )}
-          {share.isMine && (
+          {share.isMine && onExtend && share.expiry?.extendable && (
+            <Button size="sm" variant="ghost" onClick={onExtend}>
+              <CalendarPlus aria-hidden />
+              {EXTEND_COPY.button}
+            </Button>
+          )}
+          {canDelete && (
             <Button size="sm" variant="ghost" disabled={busy} onClick={() => run(actions.remove)}>
               <Trash2 aria-hidden />
               Delete

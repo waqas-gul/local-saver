@@ -18,7 +18,8 @@ import { REPORT_CATEGORY_LABELS } from "../share/copy";
  * only here, only when it is configured, and only once the reporter sends the form.
  */
 
-export type ReportTarget = { type: "link"; linkId: string } | { type: "share"; shareId: string };
+/** A room link's viewer (P4-19) names the share of the room they report. */
+export type ReportTarget = { type: "link"; linkId: string; shareId?: string } | { type: "share"; shareId: string };
 
 function errorText(error: unknown): string {
   if (error instanceof ApiRequestError) {

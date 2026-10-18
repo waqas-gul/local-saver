@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { LOCAL } from "../../scripts/local-stack.cjs";
@@ -91,12 +92,23 @@ function tally(outcomes: (string | number)[]): Record<string, number> {
   return outcomes.reduce<Record<string, number>>((acc, o) => ({ ...acc, [String(o)]: (acc[String(o)] ?? 0) + 1 }), {});
 }
 
-/** The claim function as migrated, and a copy without `status = 'active'` (the mutation). */
+/**
+ * The claim function as last migrated, and a copy without `status = 'active'` (the mutation). Later migrations replace
+ * it (P4-17: room members' claims), so the restore must be the newest definition, not Phase 3's: restoring an older one
+ * silently undoes them for every test that runs after this file on the same database.
+ */
 function claimFunctionSql(mutated: boolean): string {
-  const migration = readFileSync("supabase/migrations/20261016120100_phase3_burn.sql", "utf8");
-  const start = migration.indexOf("create function app.claim_burn_share(");
+  const definition = /create (or replace )?function app\.claim_burn_share\(/;
+  const migration = readdirSync("supabase/migrations")
+    .filter((name) => name.endsWith(".sql"))
+    .sort()
+    .reverse()
+    .map((name) => readFileSync(join("supabase/migrations", name), "utf8"))
+    .find((sql) => definition.test(sql));
+  if (!migration) throw new Error("no migration defines app.claim_burn_share");
+  const start = migration.search(definition);
   const end = migration.indexOf("$$;", migration.indexOf("as $$", start)) + 3;
-  let fn = migration.slice(start, end).replace("create function", "create or replace function");
+  let fn = migration.slice(start, end).replace(definition, "create or replace function app.claim_burn_share(");
   if (mutated) {
     const guarded = "     and s.status = 'active'\n";
     if (!fn.includes(guarded)) throw new Error("the claim's status guard moved: update the mutation check");

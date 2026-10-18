@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { RealtimeChannel } from "@supabase/supabase-js";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
+import { createAccount, signInByCode } from "./support/accounts";
 import { adminDb, closeAdminDb, Device, newNetwork } from "./support/api";
 
 /** Realtime authorization and delivery on the local Supabase stack (T-015 … T-018, DEC-011). */
@@ -67,6 +68,60 @@ describe("topic authorization", () => {
     const leaver = await device(home.ip());
     await leaver.moveTo(newNetwork().ip());
     expect((await join(leaver, `net:${spaceId}`)).status).toBe("CHANNEL_ERROR");
+  });
+});
+
+describe("accounts: topics follow the device of each session (Phase 4, C4-2)", () => {
+  async function accountDevice(email: string, ip: string | null) {
+    const d = await Device.attach(await signInByCode(email), ip);
+    devices.push(d);
+    return d;
+  }
+
+  it("a second browser of the same account can't join the network the first one is on (T4-A10)", async () => {
+    const { email } = await createAccount();
+    const home = newNetwork();
+    const away = newNetwork();
+    const first = await accountDevice(email, home.ip());
+    const second = await accountDevice(email, away.ip());
+    const [homeSpace] = (await first.observe()).spaceIds;
+    const [awaySpace] = (await second.observe()).spaceIds;
+    expect((await join(first, `net:${homeSpace}`)).status).toBe("SUBSCRIBED");
+    expect((await join(second, `net:${homeSpace}`)).status).toBe("CHANNEL_ERROR");
+    expect((await join(second, `net:${awaySpace}`)).status).toBe("SUBSCRIBED");
+    // The account-wide topic is open to every device of the account.
+    expect((await join(second, `user:${first.userId}`)).status).toBe("SUBSCRIBED");
+  });
+
+  it("presence on the network shows only the devices actually there", async () => {
+    const { email } = await createAccount();
+    const home = newNetwork();
+    const here = await accountDevice(email, home.ip());
+    const elsewhere = await accountDevice(email, newNetwork().ip());
+    const neighbour = await device(home.ip());
+    const [spaceId] = (await neighbour.observe()).spaceIds;
+    const listener = await join(neighbour, `net:${spaceId}`);
+    const present = await join(here, `net:${spaceId}`);
+    expect([listener.status, present.status]).toEqual(["SUBSCRIBED", "SUBSCRIBED"]);
+    await present.channel.track({ deviceId: here.deviceId, label: here.label });
+    expect(await waitFor(() => Object.keys(listener.channel.presenceState()).includes(here.deviceId), 3_000)).toBe(true);
+    // The other browser of the account is refused before it could track anything.
+    expect((await join(elsewhere, `net:${spaceId}`)).status).toBe("CHANNEL_ERROR");
+    expect(Object.keys(listener.channel.presenceState())).not.toContain(elsewhere.deviceId);
+  });
+
+  it("a revoked device's still-valid token can't (re)join its user topic or its network", async () => {
+    const { email } = await createAccount();
+    const home = newNetwork();
+    const revoked = await accountDevice(email, home.ip());
+    const keeper = await accountDevice(email, newNetwork().ip());
+    const [spaceId] = (await revoked.observe()).spaceIds;
+    expect((await join(revoked, `user:${revoked.userId}`)).status).toBe("SUBSCRIBED");
+    await revoked.supabase.removeAllChannels();
+    expect((await keeper.call("DELETE", `/api/v1/me/devices/${revoked.deviceId}`)).status).toBe(204);
+    expect((await join(revoked, `user:${revoked.userId}`)).status).toBe("CHANNEL_ERROR");
+    expect((await join(revoked, `net:${spaceId}`)).status).toBe("CHANNEL_ERROR");
+    expect((await join(keeper, `user:${keeper.userId}`)).status).toBe("SUBSCRIBED");
   });
 });
 

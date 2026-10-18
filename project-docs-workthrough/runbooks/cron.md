@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Applies from | Phase 1 jobs, plus the Phase 3 jobs (2026-10-16) |
+| Applies from | Phase 1 jobs, plus the Phase 3 jobs (2026-10-16), Phase 4C's billing reconciliation (added here in P4-25) and Phase 4's account deletion (P4-22, 2026-10-18) |
 | Signal | `/api/v1/health/cron` answers 503 with `heartbeat: stale` (no `cron-heartbeat` for over 10 minutes) or `jobs: failing` ([monitoring](monitoring.md)) |
 | Owner | Operator on call: **[OWNER: name and email, Q-022]** |
 | Key fact | Jobs only reclaim storage and tidy up. **Access never depends on them**: every request checks expiry, grace and status itself (T-041, T3-07). |
@@ -20,10 +20,12 @@
 | `trigger-storage-janitor` | every minute | `select app.run_job('trigger-storage-janitor')` | Posts to the janitor when rows are due ([janitor](janitor.md)) |
 | `finalize-burn-claims` | every minute | `select app.run_job('finalize-burn-claims')` | Consumes claimed burn shares past grace |
 | `cron-heartbeat` | `2-59/5` | `select app.run_job('cron-heartbeat')` | Proves pg_cron runs |
-| `purge-tombstones` | `3 3 * * *` | `select app.run_job('purge-tombstones')` | Ended shares after 30 days; records after their own dates; never reported or held shares (D-3) |
+| `purge-tombstones` | `3 3 * * *` | `select app.run_job('purge-tombstones')` | Ended shares after their snapshot's retention (30 days on Free, 365 on Pro since Phase 4); records after their own dates; never reported or held shares (D-3) |
 | `cleanup-anonymous-users` | `33 3 * * *` | `select app.run_job('cleanup-anonymous-users')` | Inactive anonymous users with nothing open; never suspended users (D-9) |
 | `reconcile-storage-usage` | `4 4 * * *` | `select app.run_job('reconcile-storage-usage')` | Recounts the quota ledger (DEC-019) |
 | `reconcile-r2-orphans` | `6 5 * * 0` | `select app.run_job('reconcile-r2-orphans')` | Opens the weekly storage reconciliation |
+| `delete-due-accounts` | `23 * * * *` | `select app.run_job('delete-due-accounts')` | Deletes accounts past their deletion grace, 100 a run ([account deletion](account-deletion.md)) |
+| `trigger-billing-reconcile` | `16 5 * * *` | `select app.run_job('trigger-billing-reconcile')` | Posts to the app's billing reconciliation, only while the `billing_reconcile` flag is on; the route records the `billing-reconcile` heartbeat ([billing](billing.md) §5) |
 
 - **Heartbeats.** Phase 3 jobs run through `app.run_job`, which writes a heartbeat (`app.job_heartbeats`) on success and on failure. A failing job is caught, recorded and raised again as a warning. So `cron.job_run_details` shows it as succeeded: use the heartbeat instead.
 - **Concurrency.** The minutes are offset so at most 8 jobs start together (04 §9.1).
@@ -69,7 +71,7 @@ select app.cron_health(true);
    select app.run_job('cron-heartbeat');
    ```
 
-   Daily jobs can wait for their next run.
+   Daily jobs, and the hourly `delete-due-accounts`, can wait for their next run. A missed billing reconciliation can be run by hand ([billing](billing.md) §5).
 6. **Confirm access stayed denied** while jobs were down. These rows are "open" in the database, but every request refuses them:
 
    ```sql

@@ -17,6 +17,9 @@ import { normalizeShortCode } from "@/lib/shared/short-code";
  * valid code into a grant for this browser and returns only the link ID; the page then shows the
  * share at /s/{linkId}, without the link's secret. After several wrong codes the server asks for
  * a Turnstile check, which this page runs only then.
+ *
+ * A code for a password link (Phase 4, P4-16) gets 409 PASSWORD_REQUIRED with the link ID: the grant is
+ * made, unverified, and the share page asks for the password.
  */
 
 function errorText(error: unknown): string {
@@ -62,6 +65,11 @@ export function CodeEntry() {
       }
       router.push(`/s/${result.linkId}`);
     } catch (e) {
+      const linkId = e instanceof ApiRequestError && e.code === "PASSWORD_REQUIRED" ? (e.details as { linkId?: unknown } | undefined)?.linkId : null;
+      if (typeof linkId === "string" && /^[A-Za-z0-9_-]{16}$/.test(linkId)) {
+        router.push(`/s/${linkId}`);
+        return;
+      }
       setError(errorText(e));
       setBusy(false);
     }

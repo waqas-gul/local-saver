@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Applies from | Phase 3 (2026-10-16), owner decision D-5 |
+| Applies from | Phase 3 (2026-10-16), owner decision D-5. Phase 4's checks (`extensions`, `billingWebhooks`, `billingReconcile`) added in P4-25 (2026-10-18). |
 | Design | An external uptime monitor polls `GET /api/v1/health/cron` and emails when it answers anything but 200. The app builds no email, Slack or pager integration. |
 | Alert recipient | **[OWNER: alert email address and the person who answers it, Q-022 / DEC-029]** |
 | Status | **Not operational.** No monitor is configured and no recipient is named. Until both exist, **nothing alerts**: failures show only on the health endpoint and in logs. |
@@ -26,8 +26,11 @@
 | `storageDrift` | `drift`, `stale` | The last ledger reconciliation found unexplained drift (AC-3.5), or it hasn't run for 2 days | `select * from app.audit_events where action = 'storage.drift_corrected' order by id desc;` |
 | `egressLists` | `missing`, `stale` (older than 3 days) | The egress refresh isn't running. At 14 days local sharing turns off everywhere. | [egress lists](egress-lists.md) |
 | `jobs` | `failing` | A job's last run failed | `select job, last_failed_at, last_error from app.job_heartbeats where last_failed_at > coalesce(last_succeeded_at, '-infinity');` |
+| `extensions` (Phase 4D, P4-15) | `stuck` | An extension copy has been pending for over 6 hours | [janitor](janitor.md) §7 |
+| `billingWebhooks` (Phase 4C) | `failing` | A billing webhook event has been `failed` for over an hour | [billing](billing.md) §4 |
+| `billingReconcile` (Phase 4C) | `stale` | Where the `billing_reconcile` flag is on: no successful billing reconciliation for 2 days | [billing](billing.md) §5 |
 
-`pending` (a job that hasn't run yet in a new environment) and `not_required` (egress lists outside staging and production) count as ok.
+`pending` (a job that hasn't run yet in a new environment) and `not_required` (egress lists outside staging and production; billing reconciliation where billing isn't live) count as ok.
 
 ## 2. Setting up the monitor
 

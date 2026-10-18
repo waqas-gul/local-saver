@@ -1,7 +1,9 @@
 import "server-only";
 import { sql, type Kysely, type Transaction } from "kysely";
 import type { DB } from "../db/types.gen";
-import type { Entitlements } from "../entitlements/plans";
+import { assertFeature } from "../entitlements/enforce";
+import { snapshotFor } from "../entitlements/snapshot";
+import type { Entitlements, Snapshot } from "../entitlements/types";
 import type { Env } from "../env";
 import { getRuntimeFlags } from "../flags";
 import { alreadyDownloaded, ApiError } from "../http/errors";
@@ -11,10 +13,10 @@ import { log } from "../log";
  * Burn after download (DEC-015; 03 §5; phase 3 §17.8–§17.10).
  *
  * Who may create one (Q-008, owner decision 2026-10-16): the Pro plan at paid launch
- * (features.burnAfterDownload); during beta and testing the Free plan while the runtime flag
+ * (features.burnAfterDownload, E10); during beta and testing the Free plan while the runtime flag
  * free_burn_after_download is on (off by default). burn_after_download_enabled is the kill switch
- * for new burn shares. Only creation is gated: claims and retries rely on the share's own row and
- * snapshot, never on the plan again (07 §5).
+ * for new burn shares, Pro included. Only creation is gated: claims and retries rely on the share's
+ * own row and snapshot, never on the plan again (07 §5).
  *
  * The claim is app.claim_burn_share: one conditional UPDATE under the share's row lock, called
  * inside the request's transaction at READ COMMITTED (the function refuses anything stricter).
@@ -33,22 +35,19 @@ export async function burnAvailable(entitlements: Entitlements, env: Env): Promi
 }
 
 /**
- * The gate at share creation. Returns the entitlement snapshot to store with the share: when burn
- * was granted, the snapshot says so, whatever granted it (plan or beta flag).
+ * The gate at share creation. Returns the entitlement snapshot (v2) to store with the share: when
+ * burn was granted, the snapshot says so, whatever granted it (plan or beta flag).
  */
-export async function burnSnapshot(entitlements: Entitlements, env: Env, requested: boolean | undefined): Promise<Entitlements> {
-  if (!requested) return entitlements;
+export async function burnSnapshot(entitlements: Entitlements, env: Env, requested: boolean | undefined): Promise<Snapshot> {
+  if (!requested) return snapshotFor(entitlements);
   const flags = await getRuntimeFlags(env);
   if (!flags.burnAfterDownloadEnabled) {
     throw new ApiError(503, "BURN_AFTER_DOWNLOAD_DISABLED", "Burn after download is paused right now");
   }
-  if (!entitlements.features.burnAfterDownload && !(entitlements.plan === "free" && flags.freeBurnAfterDownload)) {
-    throw new ApiError(403, "FEATURE_NOT_IN_PLAN", "Burn after download isn't available on your plan", {
-      feature: "burnAfterDownload",
-      requiredPlan: "pro",
-    });
+  if (!(entitlements.plan === "free" && flags.freeBurnAfterDownload)) {
+    assertFeature(entitlements, "burnAfterDownload", "Burn after download isn't available on your plan");
   }
-  return { ...entitlements, features: { ...entitlements.features, burnAfterDownload: true } } as unknown as Entitlements;
+  return snapshotFor({ ...entitlements, features: { ...entitlements.features, burnAfterDownload: true } });
 }
 
 export type Claimant =

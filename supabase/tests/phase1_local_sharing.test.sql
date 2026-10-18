@@ -35,8 +35,17 @@ select is(
     where n.nspname = 'app' and c.relkind = 'r' and not has_table_privilege('app_server', c.oid, p.priv)
       -- Phase 3 job-health tables are read-only or closed to the web tier (phase 3 §17.11);
       -- supabase/tests/phase3_janitor.test.sql pins their exact privileges.
-      and c.relname not in ('job_heartbeats', 'storage_reconcile_runs')),
-  0, 'app_server has DML on every app table (except the Phase 3 job-health tables)');
+      -- Phase 4 (D4-28, deviation DV4-2): merge intents are written only by definer functions;
+      -- supabase/tests/phase4_accounts.test.sql pins app_server's read-only access.
+      -- Phase 4B (§17.12.4, deviation DV4-18): the app reads subscriptions and overrides, never writes
+      -- them; supabase/tests/phase4_entitlements.test.sql pins that.
+      -- Phase 4C (§17.12.4, deviation DV4-35): billing customers, the webhook log and lost disputes are
+      -- written only by definer functions; supabase/tests/phase4_billing.test.sql pins that.
+      -- Phase 4D (§17.12.1, P4-15): the app inserts and reads extension rows; only the janitor's definer
+      -- functions change them; supabase/tests/phase4_extend.test.sql pins that.
+      and c.relname not in ('job_heartbeats', 'storage_reconcile_runs', 'merge_intents', 'subscriptions', 'entitlement_overrides',
+                            'billing_customers', 'billing_events', 'billing_disputes', 'share_extension_files')),
+  0, 'app_server has DML on every app table (except the Phase 3 job-health tables and the Phase 4 read-only tables)');
 
 select is(
   (select count(*)::int from pg_proc p join pg_namespace n on n.oid = p.pronamespace
@@ -79,8 +88,11 @@ insert into auth.users (id, instance_id, aud, role, is_anonymous, created_at, up
 select ('00000000-0000-4000-8000-00000000000' || i)::uuid, '00000000-0000-0000-0000-000000000000',
        'authenticated', 'authenticated', true, now(), now()
   from generate_series(1, 6) as i;
-insert into app.devices (id, user_id, label)
-select ('d0000000-0000-4000-8000-00000000000' || i)::uuid, ('00000000-0000-4000-8000-00000000000' || i)::uuid, 'Device ' || i
+-- Phase 4 (C4-2, deviation DV4-2): each device is bound to its browser's Auth session, and net:
+-- access follows the session's device, so the topic checks below carry a session_id claim.
+insert into app.devices (id, user_id, label, auth_session_id)
+select ('d0000000-0000-4000-8000-00000000000' || i)::uuid, ('00000000-0000-4000-8000-00000000000' || i)::uuid, 'Device ' || i,
+       ('e0000000-0000-4000-8000-00000000000' || i)::uuid
   from generate_series(1, 6) as i;
 
 -- Results of calls made as app_server or authenticated; assertions run as the owner.
@@ -213,7 +225,7 @@ delete from app.network_egress_ranges where source in ('private_relay', 'tor');
 -- d1 is present on space B (ok); d2 is present on space A (blocked).
 -- ---------------------------------------------------------------------------
 set local role authenticated;
-select set_config('request.jwt.claims', '{"sub":"00000000-0000-4000-8000-000000000001","role":"authenticated"}', true);
+select set_config('request.jwt.claims', '{"sub":"00000000-0000-4000-8000-000000000001","role":"authenticated","session_id":"e0000000-0000-4000-8000-000000000001"}', true);
 insert into topic_checks values
   ('present on ok space', app_realtime.can_access_topic('net:' || (select space_id from obs where step = 'b1'))),
   ('own user topic', app_realtime.can_access_topic('user:00000000-0000-4000-8000-000000000001')),
@@ -221,7 +233,7 @@ insert into topic_checks values
   ('malformed id', app_realtime.can_access_topic('net:not-a-uuid')),
   ('extra segment', app_realtime.can_access_topic('net:' || (select space_id from obs where step = 'b1') || ':x')),
   ('unknown kind', app_realtime.can_access_topic('room:' || (select space_id from obs where step = 'b1')));
-select set_config('request.jwt.claims', '{"sub":"00000000-0000-4000-8000-000000000002","role":"authenticated"}', true);
+select set_config('request.jwt.claims', '{"sub":"00000000-0000-4000-8000-000000000002","role":"authenticated","session_id":"e0000000-0000-4000-8000-000000000002"}', true);
 insert into topic_checks values
   ('not present', app_realtime.can_access_topic('net:' || (select space_id from obs where step = 'b1'))),
   ('present on blocked space', app_realtime.can_access_topic('net:' || (select space_id from obs where step = 'a1')));
@@ -232,7 +244,7 @@ reset role;
 update app.network_presence set present_until = now() - interval '1 second'
  where device_id = 'd0000000-0000-4000-8000-000000000001' and space_id = (select space_id from obs where step = 'b1');
 set local role authenticated;
-select set_config('request.jwt.claims', '{"sub":"00000000-0000-4000-8000-000000000001","role":"authenticated"}', true);
+select set_config('request.jwt.claims', '{"sub":"00000000-0000-4000-8000-000000000001","role":"authenticated","session_id":"e0000000-0000-4000-8000-000000000001"}', true);
 insert into topic_checks values
   ('presence expired', app_realtime.can_access_topic('net:' || (select space_id from obs where step = 'b1')));
 reset role;
@@ -324,7 +336,8 @@ select is(
   (select count(*)::int
      from realtime.messages m, jsonb_object_keys(m.payload) as k
     where (m.topic like 'net:%' or m.topic like 'user:%')
-      and k not in ('v', 'type', 'shareId', 'status', 'version', 'spaceId', 'id')),
+      -- Phase 4D (P4-17, §17.12.4, deviation DV4-89): membership.changed on user: topics names the room and the change.
+      and k not in ('v', 'type', 'shareId', 'status', 'version', 'spaceId', 'id', 'roomId', 'change')),
   0, 'signal payloads contain only IDs and state (T-018)');
 
 -- A file share: ending it releases committed bytes and queues the object for deletion.

@@ -7,6 +7,11 @@ create extension if not exists pgtap with schema extensions;
 
 select plan(74);
 
+-- finalize_claims counts every due claim in the database, and the local database keeps the claims of
+-- earlier integration and E2E runs. Settle those first, inside this rolled-back transaction, so the
+-- finalize assertion below counts this file's fixtures only (found in Phase 4B, deviation DV4-20).
+do $$ begin perform app.finalize_claims(100000); end $$;
+
 -- ---------------------------------------------------------------------------
 -- Structure, flags and grants
 -- ---------------------------------------------------------------------------

@@ -16,7 +16,7 @@
     "test:coverage": "vitest run --project unit --project component --coverage",
     "test:integration": "vitest run --project integration",
     "test:e2e": "playwright test",
-    "stack:start": "node scripts/local-stack.cjs prepare && supabase start -x studio,postgres-meta,imgproxy,storage-api,logflare,vector,supavisor,mailpit && node scripts/local-stack.cjs storage-start",
+    "stack:start": "node scripts/local-stack.cjs prepare && supabase start -x studio,postgres-meta,imgproxy,storage-api,logflare,vector,supavisor && node scripts/local-stack.cjs storage-start",
     "stack:stop": "node scripts/local-stack.cjs storage-stop && supabase stop",
     "stack:env": "node scripts/local-stack.cjs env",
     "egress:load": "node scripts/load-egress-ranges.cjs",

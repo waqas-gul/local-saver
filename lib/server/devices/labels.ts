@@ -26,14 +26,17 @@ export function generateDeviceLabel(random: () => number = Math.random): string 
 
 const INVISIBLE = /[\u0000-\u0008\u000E-\u001F\u007F-\u009F؜​-‏‪-‮⁠-⁩﻿]/g;
 
-/** A user-chosen label, shown to everyone on the network: no invisible or bidi characters. */
-export function cleanLabel(input: string): string {
+/**
+ * A user-chosen label, shown to everyone on the network: no invisible or bidi characters.
+ * Also cleans account display names (Phase 4, §17.5.5), which may be up to 60 characters.
+ */
+export function cleanLabel(input: string, maxLength = 40): string {
   return input
     .normalize("NFC")
     .replace(INVISIBLE, "")
     .replace(/\s+/g, " ")
     .trim()
-    .slice(0, 40)
+    .slice(0, maxLength)
     .trim();
 }
 

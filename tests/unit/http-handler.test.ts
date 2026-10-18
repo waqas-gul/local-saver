@@ -82,6 +82,27 @@ describe("withApi", () => {
     expect(text).not.toContain("hunter2");
   });
 
+  // P4-21: a merge or an account deletion took the caller's user away while its write ran.
+  it("answers a write whose own user went away mid-request as the next request would (401 DEVICE_UNKNOWN); other FK errors stay 500", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const fkError = (constraint: string, table: string) =>
+      Object.assign(new Error(`insert or update violates foreign key constraint "${constraint}"`), {
+        code: "23503",
+        constraint,
+        detail: `Key (x)=(00000000-0000-4000-8000-000000000000) is not present in table "${table}".`,
+      });
+    const gone = await withApi(async () => {
+      throw fkError("room_members_user_id_fkey", "users");
+    })(post("{}"), undefined);
+    expect(gone.status).toBe(401);
+    expect((await gone.json()).error.code).toBe("DEVICE_UNKNOWN");
+    const other = await withApi(async () => {
+      throw fkError("downloads_share_id_fkey", "shares");
+    })(post("{}"), undefined);
+    expect(other.status).toBe(500);
+  });
+
   it("accepts a body-less DELETE from an allowed Origin without a content type (DV1-13)", async () => {
     const handler = withApi(async () => new Response(null, { status: 204 }));
     const ok = await handler(new Request(`${ORIGIN}/api/v1/test`, { method: "DELETE", headers: { origin: ORIGIN } }), undefined);

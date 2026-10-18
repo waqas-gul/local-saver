@@ -5,12 +5,15 @@ import type { createTextBody, editTextBody, ShareDto } from "@/lib/shared/api/sc
 import { audit } from "../audit/log";
 import type { Caller } from "../auth/device";
 import { getDb } from "../db/client";
-import { resolveEntitlements } from "../entitlements/plans";
+import { assertNotDeletionPending, assertTextSize } from "../entitlements/enforce";
+import { resolveEntitlements } from "../entitlements/resolve";
+import { readSnapshot } from "../entitlements/snapshot";
 import type { Env } from "../env";
 import { ApiError, notFound } from "../http/errors";
 import type { NetworkView } from "../network/current";
-import { postingTarget } from "../policy/posting";
+import { assertMayWrite, postingTarget, requestedExpiry } from "../policy/posting";
 import { enforceRateLimit } from "../ratelimit/limits";
+import { lockRoomForPosting } from "../rooms/access";
 import { burnSnapshot } from "./burn";
 import { loadShareDto } from "./dto";
 import { resolveExpiry } from "./expiry";
@@ -20,13 +23,21 @@ import { requireOwnShare } from "./read";
  * Text shares (04 §4.5, DEC-027): posted to this network or link-only (DEC-033); versioned
  * last-writer-wins edits by the creator only (Q-021). A text may be burn-after-download
  * (phase 3 §17.10): then only Reveal shows it, once claimed, and it can't be edited.
+ *
+ * Phase 4 (§17.6.4): a new text gets the caller's plan's size (E3: 100 KB Free, 1 MB Pro); an edit
+ * keeps the size its share was created with, whatever the plan is now (E4, D4-12). Edits obey the
+ * kill switches and upload restrictions, as posting does (E29, C4-15).
+ *
+ * Phase 4 (P4-17): a text may go into a private room the caller is a member of (E23); room texts count against the
+ * room's text limit (300 a minute, 03 §10) instead of a network's. Only its creator edits it, and only while still
+ * in the room (a removed member can't put new words in front of it).
  */
 
-function assertTextSize(content: string, maxBytes: number): number {
-  const bytes = Buffer.byteLength(content, "utf8");
-  if (bytes > maxBytes) throw new ApiError(413, "TEXT_TOO_LARGE", "This text is too long", { maxBytes });
-  return bytes;
-}
+/**
+ * Request bodies of the text routes: the database's hard cap (1 MiB, Pro's limit) as JSON, with room
+ * for escaping. The plan's size is checked on the decoded text.
+ */
+export const TEXT_BODY_MAX_BYTES = 2 * 1024 * 1024 + 64 * 1024;
 
 export async function createText(
   caller: Caller,
@@ -35,24 +46,26 @@ export async function createText(
   env: Env,
   request: Request,
 ): Promise<ShareDto> {
-  const { spaceId, networkLimitKey } = await postingTarget(caller, network, request, env, {
-    files: false,
-    destination: body.destination,
-  });
-  const entitlements = resolveEntitlements(caller.principal);
-  const bytes = assertTextSize(body.content, entitlements.limits.maxTextBytes);
-  const expiry = resolveExpiry(entitlements, body.expiresIn);
+  const target = await postingTarget(caller, network, request, env, { files: false, destination: body.destination });
+  const { spaceId, roomId, networkLimitKey } = target;
+  const entitlements = await resolveEntitlements(caller.principal);
+  assertNotDeletionPending(entitlements);
+  const bytes = assertTextSize(entitlements, body.content);
+  const expiry = resolveExpiry(entitlements, requestedExpiry(entitlements, target, body.expiresIn));
   const snapshot = await burnSnapshot(entitlements, env, body.burnAfterDownload);
   const burn = body.burnAfterDownload === true;
   await enforceRateLimit("textWriteUser", caller.principal.userId);
-  await enforceRateLimit("textWriteSpace", networkLimitKey);
+  if (roomId) await enforceRateLimit("textWriteRoom", roomId);
+  else await enforceRateLimit("textWriteSpace", networkLimitKey);
 
   return getDb().transaction().execute(async (trx) => {
+    if (roomId) await lockRoomForPosting(trx, roomId, caller.principal.userId);
     const share = await trx
       .insertInto("app.shares")
       .values({
-        scope: body.destination,
+        scope: target.scope,
         network_space_id: spaceId,
+        room_id: roomId,
         kind: "text",
         created_by_user_id: caller.principal.userId,
         created_by_device_id: caller.device.id,
@@ -86,7 +99,7 @@ export async function createText(
       networkSpaceId: spaceId,
       targetType: "share",
       targetId: share.id,
-      metadata: { kind: "text", scope: body.destination, ...(burn ? { burn } : {}) },
+      metadata: { kind: "text", scope: target.scope, ...(roomId ? { roomId } : {}), ...(burn ? { burn } : {}) },
     });
     return loadShareDto(trx, share.id, caller.principal.userId, caller.device.id);
   });
@@ -97,14 +110,16 @@ export async function editText(
   network: NetworkView,
   shareId: string,
   body: z.infer<typeof editTextBody>,
+  env: Env,
 ): Promise<ShareDto> {
-  const share = await requireOwnShare(caller, network, shareId);
+  const share = await requireOwnShare(caller, network, shareId, { roomWrite: true });
   // A burn text is fixed once posted: someone may already be reading it.
   if (share.kind !== "text" || share.status !== "active" || share.burnAfterDownload) throw notFound();
-  const entitlements = resolveEntitlements(caller.principal);
-  const bytes = assertTextSize(body.content, entitlements.limits.maxTextBytes);
+  await assertMayWrite(caller, env, { files: false });
+  const bytes = assertTextSize(readSnapshot(share.entitlementSnapshot), body.content, { snapshot: true });
   await enforceRateLimit("textWriteUser", caller.principal.userId);
   if (share.networkSpaceId) await enforceRateLimit("textWriteSpace", share.networkSpaceId);
+  if (share.roomId) await enforceRateLimit("textWriteRoom", share.roomId);
 
   const db = getDb();
   const updated = await db

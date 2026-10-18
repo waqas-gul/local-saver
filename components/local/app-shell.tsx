@@ -3,6 +3,9 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useState, type ReactNode } from "react";
+import { ACCOUNT_COPY } from "@/components/account/copy";
+import { DeletionBanner } from "@/components/account/delete-account";
+import { ROOM_COPY } from "@/components/room/copy";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -75,12 +78,32 @@ function DeviceLabel() {
   );
 }
 
+/** Phase 4 (§17.14): sign in from an anonymous browser, account settings from an account. */
+function AccountLink() {
+  const phase = useSession((s) => s.phase);
+  const anonymous = useSession((s) => s.anonymous);
+  const hasDevice = useSession((s) => s.device !== null);
+  if (phase !== "ready" && phase !== "device_limit") return null;
+  return (
+    <Link
+      href={anonymous ? "/login" : "/settings/account"}
+      className={`text-sm whitespace-nowrap text-muted-foreground hover:text-foreground ${hasDevice ? "" : "ml-auto"}`}
+      data-testid="account-link"
+    >
+      {anonymous ? ACCOUNT_COPY.signIn : ACCOUNT_COPY.account}
+    </Link>
+  );
+}
+
 export function AppShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
   const nav = [
     { href: "/", label: "This network" },
     { href: "/uploads", label: "My uploads" },
+    // Phase 4 (P4-17): private rooms, for every browser (anyone may be a member, D4-19).
+    { href: "/rooms", label: ROOM_COPY.nav },
   ];
+  const isCurrent = (href: string) => (href === "/" ? pathname === "/" : pathname === href || pathname.startsWith(`${href}/`));
   return (
     <div className="mx-auto flex w-full max-w-2xl flex-1 flex-col gap-4 px-4 py-6">
       {/* Phones: title and device name on the first row, the tabs on their own row below. */}
@@ -91,14 +114,17 @@ export function AppShell({ children }: { children: ReactNode }) {
             <Link
               key={item.href}
               href={item.href}
-              className={`rounded-md px-2 py-1 whitespace-nowrap ${pathname === item.href ? "bg-muted font-medium" : "text-muted-foreground"}`}
+              className={`rounded-md px-2 py-1 whitespace-nowrap ${isCurrent(item.href) ? "bg-muted font-medium" : "text-muted-foreground"}`}
             >
               {item.label}
             </Link>
           ))}
         </nav>
         <DeviceLabel />
+        <AccountLink />
       </header>
+      {/* P4-22: an account whose deletion is scheduled, on every page. */}
+      <DeletionBanner />
       <main className="flex-1">{children}</main>
       <footer className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
         <Link href="/c">Enter a share code</Link>

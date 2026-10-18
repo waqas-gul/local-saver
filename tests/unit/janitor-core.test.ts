@@ -9,6 +9,7 @@ import {
   readJanitorConfig,
   runJanitor,
   type ClaimedDeletion,
+  type ClaimedExtensionCopy,
   type ClaimedHoldCopy,
   type JanitorDb,
   type JanitorStorage,
@@ -32,6 +33,12 @@ function hc(n: number, extra: Partial<ClaimedHoldCopy> = {}): ClaimedHoldCopy {
   return { id: String(n), objectKey: KEY(n), copyKey: `hold/${KEY(n)}`, refused: null, attempts: 0, ...extra };
 }
 
+/** An extended share's object to copy to its new key in a longer-lived class (P4-15). */
+const NEW_KEY = (n: number) => `d30/2026/10/17/11111111-0000-4000-8000-${String(n).padStart(12, "0")}`;
+function xc(n: number, extra: Partial<ClaimedExtensionCopy> = {}): ClaimedExtensionCopy {
+  return { id: String(n), oldKey: KEY(n), newKey: NEW_KEY(n), sizeBytes: 1000 + n, refused: null, attempts: 0, ...extra };
+}
+
 type Finish = { id: string; outcome: string; error: string | null };
 
 type FakeOptions = {
@@ -43,12 +50,24 @@ type FakeOptions = {
   missing?: Set<string>;
   /** Keys that exist (HEAD). */
   existing?: Set<string>;
+  /** Keys whose multipart abort fails (P4-14). */
+  failAborts?: Set<string>;
+  /** Batches of extension copies (P4-15). */
+  extensionCopies?: ClaimedExtensionCopy[][];
+  /** What finishing each extension copy answers (default: "copied", or "failed" for a failure). */
+  extensionResults?: Record<string, string>;
+  /** Object sizes by key (HEAD). Otherwise a new key has its row's size once copied, and nothing else exists. */
+  sizes?: Map<string, number | null>;
 };
 
 function fakes(batches: ClaimedDeletion[][], options: FakeOptions = {}) {
   const finished: Finish[] = [];
   const copyFinished: Finish[] = [];
   const copyClaims: number[] = [];
+  const extensionClaims: number[] = [];
+  const extensionFinished: Finish[] = [];
+  const copied = new Map<string, number>();
+  const rowSizes = new Map<string, number>();
   const runs: { mode: string; ok: boolean; result: unknown; error: string | null }[] = [];
   const claims: number[] = [];
   const db: JanitorDb = {
@@ -70,6 +89,16 @@ function fakes(batches: ClaimedDeletion[][], options: FakeOptions = {}) {
     async finishHoldCopy(id, outcome, error) {
       copyFinished.push({ id, outcome, error: error ?? null });
       return true;
+    },
+    async claimExtensionCopies(limit) {
+      extensionClaims.push(limit);
+      const batch = options.extensionCopies?.shift() ?? [];
+      for (const x of batch) if (x.newKey && x.sizeBytes !== null) rowSizes.set(x.newKey, x.sizeBytes);
+      return batch;
+    },
+    async finishExtensionCopy(id, outcome, error) {
+      extensionFinished.push({ id, outcome, error: error ?? null });
+      return options.extensionResults?.[id] ?? outcome;
     },
     async recordRun(mode, ok, result, error) {
       runs.push({ mode, ok, result, error: error ?? null });
@@ -96,11 +125,19 @@ function fakes(batches: ClaimedDeletion[][], options: FakeOptions = {}) {
     async copyObject(source, destination) {
       calls.push(`copy ${source} -> ${destination}`);
       if (options.failKeys?.has(source)) throw Object.assign(new Error("503"), { status: 503, code: "SlowDown" });
-      return options.missing?.has(source) ? "missing" : "copied";
+      if (options.missing?.has(source)) return "missing";
+      const size = rowSizes.get(destination);
+      if (size !== undefined) copied.set(destination, size);
+      return "copied";
     },
     async objectExists(key) {
       calls.push(`exists ${key}`);
       return options.existing?.has(key) ?? false;
+    },
+    async objectSize(key) {
+      calls.push(`size ${key}`);
+      if (options.sizes?.has(key)) return options.sizes.get(key) ?? null;
+      return copied.get(key) ?? null;
     },
     async listObjects() {
       return { keys: [], truncated: false };
@@ -108,11 +145,14 @@ function fakes(batches: ClaimedDeletion[][], options: FakeOptions = {}) {
     async listMultipartUploads() {
       return [];
     },
-    async abortMultipartUpload() {},
+    async abortMultipartUpload(key, uploadId) {
+      calls.push(`abort ${key} ${uploadId}`);
+      if (options.failAborts?.has(key)) throw Object.assign(new Error("500"), { status: 500, code: "InternalError" });
+    },
   };
   const logs: { level: string; event: string; fields: Record<string, unknown> }[] = [];
   const log: LogFn = (level, event, fields) => logs.push({ level, event, fields });
-  return { db, storage, log, finished, copyFinished, copyClaims, runs, calls, logs, claims };
+  return { db, storage, log, finished, copyFinished, copyClaims, extensionClaims, extensionFinished, runs, calls, logs, claims };
 }
 
 const OPTIONS = { dryRun: false, batchSize: 100, concurrency: 4, maxRows: 500, timeBudgetMs: 100_000, now: () => 0 };
@@ -147,11 +187,15 @@ describe("delete mode", () => {
     await runJanitor("delete", { ...f, options: OPTIONS });
     expect(f.calls.sort()).toEqual([`delete ${KEY(1)}`, `tombstone ${KEY(2)}`]);
     expect(f.finished.map((x) => `${x.id}:${x.outcome}`).sort()).toEqual(["1:deleted", "2:tombstoned", "3:tombstoned"]);
+    // Phase 4 (P4-15): the extension copies' counts join the summary (all zero here).
     expect(f.runs).toEqual([
       {
         mode: "delete",
         ok: true,
-        result: { claimed: 3, deleted: 1, tombstoned: 2, failed: 0, refused: 0, dryRun: 0, batches: 1, holdClaimed: 0, holdCopied: 0, holdUnavailable: 0, holdCopyFailed: 0 },
+        result: {
+          claimed: 3, deleted: 1, tombstoned: 2, failed: 0, refused: 0, dryRun: 0, batches: 1, holdClaimed: 0, holdCopied: 0, holdUnavailable: 0, holdCopyFailed: 0,
+          extensionClaimed: 0, extensionCopied: 0, extensionSwapped: 0, extensionCopyFailed: 0, extensionFailed: 0,
+        },
         error: null,
       },
     ]);
@@ -232,6 +276,51 @@ describe("delete mode", () => {
     await runJanitor("delete", { ...f, options: OPTIONS });
     expect(f.runs).toEqual([{ mode: "delete", ok: false, result: {}, error: "ECONNREFUSED" }]);
     expect(f.logs.find((l) => l.event === "janitor.run_failed")?.level).toBe("error");
+  });
+});
+
+describe("multipart uploads (phase 4 P4-14)", () => {
+  const UPLOAD = "2~uploadid.ABC_def-123";
+
+  it("aborts the upload, then deletes the key, and never logs the upload ID", async () => {
+    const f = fakes([[row(1, { reason: "multipart_abort", multipartUploadId: UPLOAD }), row(2)]]);
+    await runJanitor("delete", { ...f, options: { ...OPTIONS, concurrency: 1 } });
+    expect(f.calls).toEqual([`abort ${KEY(1)} ${UPLOAD}`, `delete ${KEY(1)}`, `delete ${KEY(2)}`]);
+    expect(f.finished.map((x) => `${x.id}:${x.outcome}`)).toEqual(["1:deleted", "2:deleted"]);
+    expect(JSON.stringify(f.logs)).not.toContain(UPLOAD);
+    expect(JSON.stringify(f.logs)).not.toContain(KEY(1));
+  });
+
+  it("a failed abort backs off like a failed deletion and leaves the key alone", async () => {
+    const f = fakes([[row(1, { multipartUploadId: UPLOAD, attempts: 4 })]], { failAborts: new Set([KEY(1)]) });
+    await runJanitor("delete", { ...f, options: OPTIONS });
+    expect(f.calls).toEqual([`abort ${KEY(1)} ${UPLOAD}`]);
+    expect(f.finished).toEqual([{ id: "1", outcome: "failed", error: "s3:500:InternalError" }]);
+    expect(f.logs.filter((l) => l.event === "janitor.failing")).toHaveLength(1);
+    expect(JSON.stringify(f.logs)).not.toContain(UPLOAD);
+  });
+
+  it("a dry run neither aborts nor deletes, and says it would abort", async () => {
+    const f = fakes([[row(1, { multipartUploadId: UPLOAD })]]);
+    await runJanitor("delete", { ...f, options: { ...OPTIONS, dryRun: true } });
+    expect(f.calls).toEqual([]);
+    expect(f.finished.map((x) => x.outcome)).toEqual(["dry_run"]);
+    expect(f.logs.find((l) => l.event === "janitor.would_delete")?.fields).toMatchObject({ multipart: true });
+  });
+
+  it("never aborts for a row a guard rail refused", async () => {
+    const f = fakes([[row(1, { objectKey: null, refused: "share_open", multipartUploadId: UPLOAD })]]);
+    await runJanitor("delete", { ...f, options: OPTIONS });
+    expect(f.calls).toEqual([]);
+  });
+
+  it("the database adapter passes the claim's upload ID through", async () => {
+    const db = createJanitorDb(async (text) =>
+      text.includes("janitor_claim_deletions")
+        ? [{ id: "7", object_key: KEY(7), reason: "multipart_abort", hold_until: null, tombstoned: false, refused: null, attempts: 0, hold_copy_key: null, multipart_upload_id: UPLOAD }]
+        : [],
+    );
+    expect(await db.claimDeletions(10)).toEqual([row(7, { reason: "multipart_abort", multipartUploadId: UPLOAD })]);
   });
 });
 
@@ -331,6 +420,118 @@ describe("legal hold copies (D-2, RISK-031)", () => {
     const f = fakes([], { enabled: false, copies: [[hc(5)]] });
     await runJanitor("delete", { ...f, options: OPTIONS });
     expect(f.copyClaims).toEqual([]);
+    expect(f.calls).toEqual([]);
+  });
+});
+
+describe("extension copies (phase 4 P4-15)", () => {
+  it("copies each object to its new key, checks the copy's size, records it, and reports the swap", async () => {
+    const f = fakes([], { extensionCopies: [[xc(1), xc(2)]], extensionResults: { "2": "swapped" } });
+    await runJanitor("delete", { ...f, options: { ...OPTIONS, concurrency: 1 } });
+    expect(f.calls).toEqual([`copy ${KEY(1)} -> ${NEW_KEY(1)}`, `size ${NEW_KEY(1)}`, `copy ${KEY(2)} -> ${NEW_KEY(2)}`, `size ${NEW_KEY(2)}`]);
+    expect(f.extensionFinished).toEqual([
+      { id: "1", outcome: "copied", error: null },
+      { id: "2", outcome: "copied", error: null },
+    ]);
+    expect(f.logs.find((l) => l.event === "janitor.extension_copied")).toMatchObject({ level: "info", fields: { extensionCopyId: "1", from: "d7", to: "d30" } });
+    expect(f.logs.find((l) => l.event === "janitor.extension_swapped")).toMatchObject({ level: "info", fields: { extensionCopyId: "2" } });
+    expect(f.runs[0]).toMatchObject({ ok: true, result: { extensionClaimed: 2, extensionCopied: 2, extensionSwapped: 1, extensionCopyFailed: 0 } });
+    expect(JSON.stringify(f.logs)).not.toContain(KEY(1));
+    expect(JSON.stringify(f.logs)).not.toContain(NEW_KEY(1));
+  });
+
+  it("a copy of the wrong size, a missing source and a storage error are failures, without the key; the fifth fails the extension", async () => {
+    const f = fakes([], {
+      extensionCopies: [[xc(3), xc(4), xc(5, { attempts: 4 })]],
+      sizes: new Map([[NEW_KEY(3), 7]]),
+      missing: new Set([KEY(4)]),
+      failKeys: new Set([KEY(5)]),
+      extensionResults: { "5": "extension_failed" },
+    });
+    await runJanitor("delete", { ...f, options: { ...OPTIONS, concurrency: 1 } });
+    expect(f.extensionFinished).toEqual([
+      { id: "3", outcome: "failed", error: "size_mismatch" },
+      { id: "4", outcome: "failed", error: "source_missing" },
+      { id: "5", outcome: "failed", error: "s3:503:SlowDown" },
+    ]);
+    expect(f.logs.filter((l) => l.event === "janitor.extension_copy_failed").map((l) => [l.fields.extensionCopyId, l.level])).toEqual([
+      ["3", "warn"],
+      ["4", "error"],
+      ["5", "warn"],
+    ]);
+    expect(f.logs.filter((l) => l.event === "janitor.extension_failed").map((l) => [l.fields.extensionCopyId, l.level])).toEqual([["5", "error"]]);
+    expect(f.runs[0]).toMatchObject({ ok: true, result: { extensionCopyFailed: 3, extensionFailed: 1, extensionCopied: 0 } });
+    expect(JSON.stringify(f.logs)).not.toContain(KEY(4));
+  });
+
+  it("never copies a refused row, or one whose keys aren't two different generated keys, the new one longer-lived", async () => {
+    const f = fakes([], {
+      extensionCopies: [
+        [
+          xc(1, { oldKey: null, newKey: null, sizeBytes: null, refused: "key_mismatch" }),
+          xc(2, { newKey: `hold/${KEY(2)}` }),
+          xc(3, { newKey: KEY(3) }),
+          xc(4, { newKey: KEY(9) }),
+          xc(5, { oldKey: "d7/../x" }),
+        ],
+      ],
+    });
+    await runJanitor("delete", { ...f, options: { ...OPTIONS, concurrency: 1 } });
+    expect(f.calls).toEqual([]);
+    expect(f.extensionFinished.map((x) => `${x.id}:${x.outcome}:${x.error}`)).toEqual([
+      "2:failed:guard:key_format",
+      "3:failed:guard:key_format",
+      "4:failed:guard:key_format",
+      "5:failed:guard:key_format",
+    ]);
+    expect(f.logs.filter((l) => l.event === "janitor.guard_refused").map((l) => l.fields.guard)).toEqual([
+      "key_mismatch",
+      "key_format",
+      "key_format",
+      "key_format",
+      "key_format",
+    ]);
+  });
+
+  it("runs after the deletions, in waves no larger than the concurrency, within the row budget", async () => {
+    const f = fakes([[row(1)]], { extensionCopies: [[xc(10), xc(11), xc(12), xc(13)], [xc(14), xc(15)]] });
+    await runJanitor("delete", { ...f, options: { ...OPTIONS, concurrency: 4, maxRows: 7 } });
+    expect(f.calls[0]).toBe(`delete ${KEY(1)}`);
+    expect(f.extensionClaims).toEqual([4, 2]);
+    expect(f.extensionFinished).toHaveLength(6);
+  });
+
+  it("stops claiming copies when the time budget runs out", async () => {
+    let now = 0;
+    const f = fakes([], { extensionCopies: [[xc(1)], [xc(2)]] });
+    const copy = f.storage.copyObject.bind(f.storage);
+    f.storage.copyObject = async (source, destination) => {
+      now += 60_000;
+      return copy(source, destination);
+    };
+    await runJanitor("delete", { ...f, options: { ...OPTIONS, timeBudgetMs: 100_000, now: () => now } });
+    expect(f.extensionClaims).toEqual([4, 4]);
+    expect(f.extensionFinished).toHaveLength(2);
+  });
+
+  it("copies in a dry run too: a copy deletes nothing", async () => {
+    const f = fakes([], { extensionCopies: [[xc(1)]] });
+    await runJanitor("delete", { ...f, options: { ...OPTIONS, dryRun: true } });
+    expect(f.calls).toEqual([`copy ${KEY(1)} -> ${NEW_KEY(1)}`, `size ${NEW_KEY(1)}`]);
+    expect(f.extensionFinished.map((x) => x.outcome)).toEqual(["copied"]);
+  });
+
+  it("a copy whose extension ended meanwhile is logged as stale", async () => {
+    const f = fakes([], { extensionCopies: [[xc(1)]], extensionResults: { "1": "stale" } });
+    await runJanitor("delete", { ...f, options: OPTIONS });
+    expect(f.logs.find((l) => l.event === "janitor.extension_copied")).toMatchObject({ fields: { extensionCopyId: "1", stale: true } });
+    expect(f.runs[0]).toMatchObject({ result: { extensionCopied: 1, extensionSwapped: 0 } });
+  });
+
+  it("claims no copies while the kill switch is off", async () => {
+    const f = fakes([], { enabled: false, extensionCopies: [[xc(1)]] });
+    await runJanitor("delete", { ...f, options: OPTIONS });
+    expect(f.extensionClaims).toEqual([]);
     expect(f.calls).toEqual([]);
   });
 });
@@ -469,6 +670,10 @@ describe("database adapter", () => {
       if (text.includes("janitor_finish_deletion")) return [{ ok: true }];
       if (text.includes("janitor_claim_hold_copies")) return [{ id: "6", object_key: KEY(6), copy_key: `hold/${KEY(6)}`, refused: null, attempts: 1 }];
       if (text.includes("janitor_finish_hold_copy")) return [{ ok: true }];
+      if (text.includes("janitor_claim_extension_copies")) {
+        return [{ id: "7", old_key: KEY(7), new_key: NEW_KEY(7), size_bytes: "5368709120", refused: null, attempts: 3 }];
+      }
+      if (text.includes("janitor_finish_extension_copy")) return [{ result: "swapped" }];
       return [];
     });
     expect(await db.beginRun("delete")).toEqual({ enabled: true });
@@ -476,12 +681,16 @@ describe("database adapter", () => {
     await db.finishDeletion("5", "failed", "s3:500");
     expect(await db.claimHoldCopies(50)).toEqual([hc(6, { attempts: 1 })]);
     expect(await db.finishHoldCopy("6", "copied")).toBe(true);
+    expect(await db.claimExtensionCopies(8)).toEqual([xc(7, { sizeBytes: 5368709120, attempts: 3 })]);
+    expect(await db.finishExtensionCopy("7", "copied")).toBe("swapped");
     await db.recordRun("delete", true, { deleted: 1 });
     for (const q of queries) {
       expect(q.text).toMatch(/app\.janitor_[a-z_]+\(/);
       expect(q.text).not.toContain(KEY(5));
       expect(q.text).not.toContain(KEY(6));
+      expect(q.text).not.toContain(KEY(7));
     }
+    expect(queries.find((q) => q.text.includes("finish_extension_copy"))?.params).toEqual(["7", "copied", null]);
     expect(queries.find((q) => q.text.includes("finish_hold_copy"))?.params).toEqual(["6", "copied", null]);
     expect(queries.find((q) => q.text.includes("finish"))?.params).toEqual(["5", "failed", "s3:500"]);
     expect(queries.find((q) => q.text.includes("record_run"))?.params).toEqual(["delete", true, '{"deleted":1}', null]);

@@ -15,3 +15,12 @@ select vault.create_secret('http://kong:8000/functions/v1/storage-janitor', 'sto
                            'Local stack only: where pg_net posts janitor runs');
 select vault.create_secret('local-only-janitor-trigger-secret-0000000000000001', 'storage_janitor_secret',
                            'Local stack only: bearer secret for the storage-janitor function');
+
+-- Phase 4C: billing reconciliation (phase 4 §17.7.7). pg_net posts to the web app's reconcile route
+-- with this bearer secret, only while the billing_reconcile runtime flag is on (off by default). Local
+-- values only: the URL is `pnpm dev` as seen from the database container, and the secret matches
+-- LOCAL.billingReconcileSecret in scripts/local-stack.cjs.
+select vault.create_secret('http://host.docker.internal:3000/api/v1/internal/billing/reconcile', 'billing_reconcile_url',
+                           'Local stack only: where pg_net posts billing reconciliation runs');
+select vault.create_secret('local-only-billing-reconcile-secret-00000000000001', 'billing_reconcile_secret',
+                           'Local stack only: bearer secret for the billing reconcile route');

@@ -1,11 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { resolveEntitlements } from "@/lib/server/entitlements/plans";
+import { resolveEntitlements } from "@/lib/server/entitlements/resolve";
 import { assertRemoteAllowed, remoteFilePolicy } from "@/lib/server/security/file-policy";
 import { riskFlags } from "@/lib/server/security/file-risk";
 
 /** Remote-link file policy (03 §7.4, Q-010 assumed, T-035 unit part). */
 
-const free = resolveEntitlements({ userId: "u", isAnonymous: true });
+// Resolution is asynchronous since Phase 4 (P4-01); anonymous users are Free without a database read.
+const free = await resolveEntitlements({ userId: "u", isAnonymous: true });
 const noContent = { executable: false, script: false, archive: false };
 const flagsFor = (name: string) => riskFlags({ name, extension: name.split(".").pop() ?? "" }, noContent);
 

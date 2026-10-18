@@ -1,0 +1,19 @@
+{{- /* Supabase Auth: a sign-in to an existing account (signInWithOtp). Phase 4 §17.5.8, P4-23.
+The link opens the app's /auth/callback, which follows Supabase's link only after a click: mail scanners open links,
+and following Supabase's link would use up the code. Template comments never reach the recipient; HTML comments do.
+Copy: OWNER REVIEW. */ -}}
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+</head>
+<body style="font-family: system-ui, sans-serif; line-height: 1.5">
+<h2>Sign in to Local Saver</h2>
+<p>Your sign-in code is:</p>
+<p style="font-size: 24px; font-weight: bold; letter-spacing: 4px">{{ .Token }}</p>
+<p>Enter it on the page where you asked to sign in. It expires in 1 hour.</p>
+<p>You can also <a href="{{ .RedirectTo }}#confirm={{ .ConfirmationURL }}">sign in with this link</a>, in the same browser.</p>
+<p>If you didn't ask to sign in, you can ignore this email.</p>
+</body>
+</html>

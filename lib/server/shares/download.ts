@@ -7,8 +7,8 @@ import { userAgentFamily } from "../devices/labels";
 import type { Env } from "../env";
 import { ApiError, notFound } from "../http/errors";
 import type { NetworkView } from "../network/current";
+import { readSnapshot } from "../entitlements/snapshot";
 import { enforceRateLimit } from "../ratelimit/limits";
-import { FREE_LIMITS } from "@/lib/shared/plans";
 import type { RevealResponse } from "@/lib/shared/api/schemas";
 import { DOWNLOAD_URL_TTL_SECONDS, PREVIEW_URL_TTL_SECONDS, presignGet } from "../storage/s3";
 import { BURN_MAX_ISSUANCES, claimOrRetry, confirmBurnReceived, requireConfirmation } from "./burn";
@@ -23,7 +23,20 @@ import { findVisibleShare, isUuid } from "./read";
  * claims the share and needs { confirm: true }; the claimant then gets at most 3 URLs per file
  * while the grace lasts, and everyone else 410 ALREADY_DOWNLOADED. Burn shares have no previews.
  * The creator may keep downloading until the share is consumed (D-7).
+ *
+ * Phase 4: the preview size and the download log's retention come from the share's snapshot (E27).
+ *
+ * Phase 4 (P4-17): a room share's members download and preview from any network (the visibility rule's room
+ * branch); their URLs count against the room as other people's count against a network space, and the log says
+ * room_member, with the room. The first member other than the creator to download a burn share claims it (DEC-015).
  */
+
+/** Per-place URL limit for everyone but the creator: the share's network space, or its room. */
+async function limitPlace(share: { isCreator: boolean; networkSpaceId: string | null; roomId: string | null }): Promise<void> {
+  if (share.isCreator) return;
+  if (share.networkSpaceId) await enforceRateLimit("downloadUrlSpace", share.networkSpaceId);
+  if (share.roomId) await enforceRateLimit("downloadUrlRoom", share.roomId);
+}
 
 export type BurnIssuanceDto = { availableUntil: string; left: number };
 export type DownloadUrl = { url: string; expiresAt: string; fileName: string; sizeBytes: number; riskFlags: string[]; burn?: BurnIssuanceDto };
@@ -55,9 +68,10 @@ async function issue(
   if (burnClaim) requireConfirmation(confirm, "file");
 
   await enforceRateLimit("downloadUrl", caller.device.id);
-  if (share.networkSpaceId && !share.isCreator) await enforceRateLimit("downloadUrlSpace", share.networkSpaceId);
+  await limitPlace(share);
   const size = Number(file.size_bytes);
-  if (kind === "preview" && (share.burnAfterDownload || file.preview_kind !== "image" || size > FREE_LIMITS.maxPreviewBytes)) {
+  const snapshot = readSnapshot(share.entitlementSnapshot);
+  if (kind === "preview" && (share.burnAfterDownload || file.preview_kind !== "image" || size > snapshot.limits.maxPreviewBytes)) {
     throw new ApiError(422, "PREVIEW_UNAVAILABLE", "No preview for this file");
   }
 
@@ -86,14 +100,15 @@ async function issue(
   }
 
   const url = await presignGet(env, file.object_key, ttl);
-  const retentionDays = (share.entitlementSnapshot as { historyRetentionDays?: number }).historyRetentionDays ?? 30;
+  const retentionDays = snapshot.historyRetentionDays;
   await db
     .insertInto("app.downloads")
     .values({
       share_id: share.id,
       file_id: file.id,
       network_space_id: share.networkSpaceId,
-      actor_kind: share.isCreator ? "creator" : "network_device",
+      room_id: share.roomId,
+      actor_kind: share.isCreator ? "creator" : share.roomId ? "room_member" : "network_device",
       user_id: caller.principal.userId,
       device_id: caller.device.id,
       event: kind === "preview" ? "preview_issued" : "url_issued",
@@ -138,7 +153,7 @@ export async function revealText(
   if (!share || share.kind !== "text" || !share.burnAfterDownload) throw notFound();
   if (!share.isCreator) requireConfirmation(confirm, "text");
   await enforceRateLimit("downloadUrl", caller.device.id);
-  if (share.networkSpaceId && !share.isCreator) await enforceRateLimit("downloadUrlSpace", share.networkSpaceId);
+  await limitPlace(share);
 
   const db = getDb();
   if (share.isCreator) {

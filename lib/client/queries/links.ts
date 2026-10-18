@@ -15,7 +15,8 @@ const VIEWER_POLL_MS = 30_000;
 
 /**
  * The viewer's content, or why there is none. A 404 or 410 replaces the cached content (rule 4:
- * nothing of an ended link stays in memory) and stops the polling.
+ * nothing of an ended link stays in memory) and stops the polling. So does 409 PASSWORD_REQUIRED
+ * (Phase 4, P4-16): a browser that must prove a (new) password keeps nothing of the share meanwhile.
  */
 export type ViewerResult = { content: ViewerContent; ended: null } | { content: null; ended: ApiRequestError };
 
@@ -23,7 +24,9 @@ export async function fetchViewerContent(api: ApiClient, linkId: string): Promis
   try {
     return { content: await api.request("GET", `/api/v1/links/${linkId}/content`, { schema: viewerContentResponse }), ended: null };
   } catch (error) {
-    if (error instanceof ApiRequestError && (error.status === 404 || error.status === 410)) return { content: null, ended: error };
+    if (error instanceof ApiRequestError && (error.status === 404 || error.status === 410 || error.code === "PASSWORD_REQUIRED")) {
+      return { content: null, ended: error };
+    }
     throw error;
   }
 }

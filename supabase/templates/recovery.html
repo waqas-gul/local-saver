@@ -1,0 +1,16 @@
+{{- /* Supabase Auth: a password-reset request (resetPasswordForEmail), which anyone can make for any address with the
+publishable key. Local Saver has no passwords (D4-2), so this email gives nothing to sign in with: no code and no link
+with a token, only the way to the sign-in page. Phase 4 §17.5.8, P4-23. Copy: OWNER REVIEW. */ -}}
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+</head>
+<body style="font-family: system-ui, sans-serif; line-height: 1.5">
+<h2>There's no password to reset</h2>
+<p>Someone asked to reset the password for {{ .Email }} on Local Saver. Local Saver doesn't use passwords, so there is nothing to reset and nothing has changed.</p>
+<p>To sign in, go to <a href="{{ .SiteURL }}/login">the sign-in page</a> and ask for a code.</p>
+<p>If you didn't ask for this, you can ignore this email.</p>
+</body>
+</html>

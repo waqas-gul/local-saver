@@ -60,7 +60,12 @@ describe("fetch storage", () => {
     await expect(storage.copyObject(KEY, `hold/d7/2026/10/16/00000000-0000-4000-8000-000000000002`)).rejects.toThrow(/invalid object key/);
     await expect(storage.copyObject(`hold/${KEY}`, `hold/hold/${KEY}`)).rejects.toThrow(/invalid object key/);
     await expect(storage.copyObject(KEY, KEY)).rejects.toThrow(/invalid object key/);
+    // Phase 4 (P4-15): an extension copy goes to a generated key of a longer-lived class, never d7, ws/ or anything else.
+    await expect(storage.copyObject(KEY, "d7/2026/10/17/00000000-0000-4000-8000-000000000002")).rejects.toThrow(/invalid object key/);
+    await expect(storage.copyObject(KEY, "ws/2026/10/17/00000000-0000-4000-8000-000000000002")).rejects.toThrow(/invalid object key/);
+    await expect(storage.copyObject(KEY, "d30/2026/10/17/x")).rejects.toThrow(/invalid object key/);
     await expect(storage.objectExists("../x")).rejects.toThrow(/invalid object key/);
+    await expect(storage.objectSize(`hold/${KEY}`)).rejects.toThrow(/invalid object key/);
     expect(requests).toEqual([]);
   });
 
@@ -73,6 +78,33 @@ describe("fetch storage", () => {
       url: `http://local-saver-s3:9000/b/hold/${KEY}`,
       headers: { "x-amz-copy-source": `/b/${KEY}`, "x-amz-metadata-directive": "COPY" },
     });
+  });
+
+  it("copies an extended share's object to its new key in a longer-lived class (P4-15)", async () => {
+    const ok = `<?xml version="1.0" encoding="UTF-8"?><CopyObjectResult><ETag>"abc"</ETag></CopyObjectResult>`;
+    const { storage, requests } = fake([new Response(ok, { status: 200 }), new Response(ok, { status: 200 })]);
+    const d30 = "d30/2026/10/17/11111111-0000-4000-8000-000000000001";
+    const d90 = "d90/2026/10/17/11111111-0000-4000-8000-000000000002";
+    expect(await storage.copyObject(KEY, d30)).toBe("copied");
+    expect(await storage.copyObject(d30, d90)).toBe("copied");
+    expect(requests.map((r) => [r.method, r.url, r.headers["x-amz-copy-source"], r.headers["x-amz-metadata-directive"]])).toEqual([
+      ["PUT", `http://local-saver-s3:9000/b/${d30}`, `/b/${KEY}`, "COPY"],
+      ["PUT", `http://local-saver-s3:9000/b/${d90}`, `/b/${d30}`, "COPY"],
+    ]);
+  });
+
+  it("reads an object's size with HEAD: null when it is missing, an error otherwise", async () => {
+    const { storage, requests } = fake([
+      new Response(null, { status: 200, headers: { "content-length": "5368709120" } }),
+      new Response(null, { status: 404 }),
+      new Response(null, { status: 403 }),
+      new Response(null, { status: 200 }),
+    ]);
+    expect(await storage.objectSize(KEY)).toBe(5368709120);
+    expect(await storage.objectSize(KEY)).toBeNull();
+    await expect(storage.objectSize(KEY)).rejects.toMatchObject({ status: 403 });
+    await expect(storage.objectSize(KEY)).rejects.toMatchObject({ status: 200, code: "NoContentLength" });
+    expect(requests.map((r) => r.method)).toEqual(["HEAD", "HEAD", "HEAD", "HEAD"]);
   });
 
   it("a missing source is reported, a missing bucket and an error inside a 200 are errors", async () => {

@@ -7,7 +7,7 @@ import { getDb } from "../db/client";
 import type { Env } from "../env";
 import { ApiError, notFound } from "../http/errors";
 import { log } from "../log";
-import { requireViewerAccess } from "../links/grants";
+import { requireViewerAccess, shareTarget } from "../links/grants";
 import { currentNetwork } from "../network/current";
 import { requesterKey } from "../network/requester";
 import { enforceRateLimit } from "../ratelimit/limits";
@@ -18,7 +18,7 @@ import { findVisibleShare } from "../shares/read";
  * Abuse reports (03 §7.6, 05 §6 Phase 2). Anyone who can see a share may report it: a device
  * on its network or its creator (through the local API), or a link viewer holding a grant for
  * one of its links. Nobody can report what they cannot see, so reports can't be used to probe
- * for shares. Limits: 10 an hour per network key and per reporter, plus Turnstile wherever the
+ * for shares. A room link's viewer (P4-19) names the share of that room they report. Limits: 10 an hour per network key and per reporter, plus Turnstile wherever the
  * server verifies it (every deployment).
  *
  * Every report is stored, audited (report.created) and logged at warn level as
@@ -42,8 +42,9 @@ type Target = {
 
 async function resolveTarget(request: Request, env: Env, body: Body): Promise<Target> {
   if (body.target.type === "link") {
-    // A link viewer: needs a live grant for this very link (404 LINK_UNAVAILABLE otherwise).
-    const access = await requireViewerAccess(request, env, body.target.linkId);
+    // A link viewer: needs a live grant for this very link (404 LINK_UNAVAILABLE otherwise); through a room link,
+    // the named share must be one the link shows (404 otherwise).
+    const access = await shareTarget(await requireViewerAccess(request, env, body.target.linkId), body.target.shareId);
     return {
       shareId: access.shareId,
       linkId: access.linkId,

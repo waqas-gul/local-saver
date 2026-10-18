@@ -7,7 +7,13 @@ import { stack } from "./api";
  * test picks, with an S3 error status or a dropped connection. Test support only; no package.
  */
 
-export type Fault = { method: string; times: number; kind: 500 | 503 | "drop" };
+export type Fault = {
+  method: string;
+  times: number;
+  kind: 500 | 503 | "drop";
+  /** Only requests carrying this header, e.g. x-amz-copy-source for CopyObject (a PUT, like a tombstone). */
+  header?: string;
+};
 
 export type FaultProxy = {
   endpoint: string;
@@ -24,7 +30,7 @@ export async function startFaultProxy(): Promise<FaultProxy> {
   const seen: string[] = [];
 
   const server: Server = createServer((req: IncomingMessage, res) => {
-    const fault = faults.find((f) => f.method === req.method && f.times > 0);
+    const fault = faults.find((f) => f.method === req.method && f.times > 0 && (f.header === undefined || req.headers[f.header] !== undefined));
     if (fault) {
       fault.times--;
       if (fault.kind === "drop") {

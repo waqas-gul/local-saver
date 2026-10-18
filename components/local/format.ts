@@ -1,16 +1,7 @@
 /** Display formatting for sizes and times (plain functions, no locale data loaded). */
 
-export function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  const units = ["KB", "MB", "GB"];
-  let value = bytes / 1024;
-  let unit = 0;
-  while (value >= 1024 && unit < units.length - 1) {
-    value /= 1024;
-    unit++;
-  }
-  return `${value < 10 ? value.toFixed(1) : Math.round(value)} ${units[unit]}`;
-}
+// Sizes are shared with lib/client (upload errors) and the pricing page since Phase 4B.
+export { formatBytes } from "@/lib/shared/format";
 
 export function timeAgo(iso: string, now = Date.now()): string {
   const seconds = Math.max(0, Math.round((now - Date.parse(iso)) / 1000));

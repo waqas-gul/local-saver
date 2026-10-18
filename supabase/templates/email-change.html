@@ -1,0 +1,19 @@
+{{- /* Supabase Auth: adding an email to a device (the upgrade) or changing an account's email. With
+double_confirm_changes, the current and the new address each get this email with their own code. Phase 4 §17.5.8, P4-23.
+The link opens the app's /auth/callback, which follows Supabase's link only after a click (mail scanners).
+Copy: OWNER REVIEW. */ -}}
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+</head>
+<body style="font-family: system-ui, sans-serif; line-height: 1.5">
+<h2>Confirm your email for Local Saver</h2>
+<p>Someone asked to use {{ .NewEmail }} for a Local Saver account. Your confirmation code is:</p>
+<p style="font-size: 24px; font-weight: bold; letter-spacing: 4px">{{ .Token }}</p>
+<p>Enter it on the page where you asked for it. It expires in 1 hour.</p>
+<p>You can also <a href="{{ .RedirectTo }}#confirm={{ .ConfirmationURL }}">confirm with this link</a>, in the same browser.</p>
+<p>If this wasn't you, you can ignore this email and nothing changes.</p>
+</body>
+</html>

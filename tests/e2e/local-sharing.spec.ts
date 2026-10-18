@@ -76,7 +76,9 @@ test("files upload with progress, preview on another device and download as atta
   await expect(feed(b).getByText(name)).toBeVisible({ timeout: 5_000 });
   const preview = feed(b).getByRole("img", { name: "pixel.png" });
   await expect(preview).toBeVisible();
-  expect(await preview.evaluate((img: HTMLImageElement) => img.naturalWidth)).toBe(1);
+  // The <img> has a fixed size, so it is visible before its bytes arrive: wait until it has loaded
+  // (a broken image completes with width 0 and still fails).
+  await expect.poll(() => preview.evaluate((img: HTMLImageElement) => (img.complete ? img.naturalWidth : -1))).toBe(1);
 
   const downloadPromise = b.page.waitForEvent("download");
   await feed(b).getByRole("button", { name: `Download ${name}` }).click();

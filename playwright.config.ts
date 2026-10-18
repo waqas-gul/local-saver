@@ -1,5 +1,6 @@
 import { defineConfig, devices } from "@playwright/test";
 import { LOCAL, STORAGE, supabaseStatus } from "./scripts/local-stack.cjs";
+import { FAKE_BILLING } from "./tests/support/fake-billing";
 
 /**
  * E2E runs against the production build (`pnpm build` first), as the Next.js guide recommends.
@@ -9,12 +10,15 @@ import { LOCAL, STORAGE, supabaseStatus } from "./scripts/local-stack.cjs";
  * - STACK  (port 3102): the full local stack (Supabase, RustFS) with the test client-IP
  *   override, for the Phase 1 multi-device and Phase 2 remote-sharing tests
  *   (tests/e2e/local-*.spec.ts). Started only when the local stack is running (`pnpm stack:start`).
+ *   Phase 4C: its billing provider is the fake one (tests/support/fake-billing.ts), which global
+ *   setup starts on BILLING_PORT, hosted checkout pages included.
  */
 
 export const OPEN_URL = "http://127.0.0.1:3100";
 export const LOCKED_URL = "http://127.0.0.1:3101";
 export const STACK_URL = "http://127.0.0.1:3102";
 export const E2E_ORIGIN_SECRET = "e2e-origin-secret-not-used-anywhere-else-0001";
+export const BILLING_PORT = 3197;
 
 const isCI = Boolean(process.env.CI);
 
@@ -67,6 +71,14 @@ function stackServer() {
       // Phase 3: global setup turns free_burn_after_download on for the run; apply flags at once.
       RUNTIME_FLAGS_CACHE_SECONDS: "0",
       LOG_LEVEL: "warn",
+      // Phase 4C: the fake billing provider (tests and local development only).
+      BILLING_PROVIDER: "fake",
+      BILLING_API_KEY: FAKE_BILLING.apiKey,
+      BILLING_WEBHOOK_SECRET: FAKE_BILLING.webhookSecret,
+      BILLING_PRICE_PRO_MONTH: FAKE_BILLING.prices.month,
+      BILLING_PRICE_PRO_YEAR: FAKE_BILLING.prices.year,
+      BILLING_FAKE_API_URL: `http://127.0.0.1:${BILLING_PORT}`,
+      BILLING_RECONCILE_SECRET: LOCAL.billingReconcileSecret,
     } as Record<string, string>,
   };
 }

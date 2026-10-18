@@ -146,7 +146,7 @@ select throws_ok(
   $$insert into app.share_links (id, target_type, share_id, secret_hmac, pepper_version, expires_at, entitlement_snapshot)
     values ('AAAAAAAAAAAAAAA9', 'room', 'b1000000-0000-4000-8000-000000000001', decode(repeat('09', 32), 'hex'), 1,
             now() + interval '1 hour', '{}')$$,
-  '23514', null, 'a link targets one share: no room or network-feed links (Q-028)');
+  '23514', null, 'a link targets one share, or (P4-19) one room by its room_id: a room target without its room is refused, and there are no network-feed links (Q-028)');
 
 -- ---------------------------------------------------------------------------
 -- Viewer sessions and grants (04 §7.5)

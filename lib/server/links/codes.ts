@@ -8,7 +8,7 @@ import { IntegrationNotConfiguredError } from "../config/integrations";
 import { getDb } from "../db/client";
 import type { Env } from "../env";
 import { assertRemoteLinksEnabled } from "../flags";
-import { ApiError } from "../http/errors";
+import { ApiError, passwordRequired, withHeaders } from "../http/errors";
 import { log } from "../log";
 import { requesterKey } from "../network/requester";
 import { addFailure, blockedUntil, countInWindow, retryAfterSeconds, setBlock } from "../ratelimit/limits";
@@ -26,6 +26,10 @@ import { currentSessionHash, issueSession } from "./sessions";
  *   every further attempt (without Turnstile configured, attempts wait for the window instead);
  * - 20 failures in a day per network key: that network is blocked for 24 hours;
  * - 1,000 failures in 10 minutes across everyone: an error log for alerting (global spike).
+ *
+ * A code never skips a link's password (Phase 4, P4-16, C4-8): on a password link the grant is made
+ * unverified and the answer is 409 PASSWORD_REQUIRED { linkId } with the session cookie; the share page
+ * then asks for the password, and accessFor refuses the grant on every viewer route until it is proved.
  */
 
 const FAILURE_WINDOW = "10 minutes";
@@ -57,25 +61,29 @@ async function recordFailure(networkKey: string, subjects: string[]): Promise<vo
   if (global === GLOBAL_ALERT) log.error("code.resolve_failure_spike", { failures: global, window: FAILURE_WINDOW });
 }
 
-/** The live link a code belongs to, or null. Codes, links and shares are all checked here. */
-async function findLiveCode(env: Env, code: string): Promise<string | null> {
+/**
+ * The live link a code belongs to, or null. Codes, links and shares are all checked here, and the
+ * creator: a suspended creator's codes grant nothing (C4-15, D4-4), like an invalid code.
+ */
+async function findLiveCode(env: Env, code: string): Promise<{ id: string; hasPassword: boolean } | null> {
   const hashes = shortCodeHmacs(env.codePeppers, code);
   const rows = await getDb()
     .selectFrom("app.share_links as l")
     .innerJoin("app.shares as s", "s.id", "l.share_id")
-    .select(["l.id", "l.short_code_hmac", "l.short_code_pepper_version"])
+    .select(["l.id", "l.short_code_hmac", "l.short_code_pepper_version", sql<boolean>`l.password_hash is not null`.as("has_password")])
     .where("l.short_code_hmac", "in", hashes.map((h) => h.hmac))
     .where(sql<boolean>`l.short_code_expires_at > now()`)
     .where("l.revoked_at", "is", null)
     .where(sql<boolean>`l.expires_at > now()`)
     .where("s.status", "=", "active")
     .where(sql<boolean>`s.expires_at > now()`)
+    .where(sql<boolean>`not exists (select 1 from app.user_flags uf where uf.user_id = s.created_by_user_id and uf.suspended_at is not null)`)
     .execute();
   // The hash must match under the pepper version it was stored with.
   const match = rows.find((row) =>
     hashes.some((h) => h.version === row.short_code_pepper_version && row.short_code_hmac !== null && h.hmac.equals(row.short_code_hmac)),
   );
-  return match?.id ?? null;
+  return match ? { id: match.id, hasPassword: match.has_password } : null;
 }
 
 export async function resolveCode(
@@ -111,16 +119,18 @@ export async function resolveCode(
   }
 
   const code = normalizeShortCode(body.code);
-  const linkId = code ? await findLiveCode(env, code) : null;
-  if (!linkId) {
+  const live = code ? await findLiveCode(env, code) : null;
+  if (!live) {
     await recordFailure(networkKey, subjects);
     throw codeUnavailable();
   }
+  const linkId = live.id;
 
   const issued = await getDb().transaction().execute(async (trx) => {
     const created = await issueSession(trx, request, env);
     await grantAccess(trx, created.hash, linkId, "code");
     return created;
   });
+  if (live.hasPassword) throw withHeaders(passwordRequired(linkId), { "Set-Cookie": issued.setCookie });
   return { linkId, setCookie: issued.setCookie };
 }

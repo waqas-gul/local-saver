@@ -17,6 +17,17 @@ afterAll(async () => {
 
 const BYTES = new TextEncoder().encode("the secret file");
 
+/**
+ * GET /me/entitlements. Phase 4B (§17.6.3, deviation DV4-19) extends the response with the plan's
+ * source, limits, usage and subscription, so the Phase 3 exact-shape assertions now check the plan
+ * and the burn feature exactly, and the full key set, instead of the whole body.
+ */
+async function burnEntitlements(d: Device, burnAfterDownload: boolean) {
+  const { body } = await d.call("GET", "/api/v1/me/entitlements");
+  expect(body).toMatchObject({ plan: "free", features: { burnAfterDownload } });
+  expect(Object.keys(body).sort()).toEqual(["features", "limits", "plan", "source", "subscription", "usage"]);
+}
+
 async function burnFile(creator: Device, name = "secret.txt", bytes: Uint8Array = BYTES, type = "text/plain", destination: "network" | "link_only" = "network") {
   const { init, upload, complete } = await creator.uploadFile(name, bytes, type, bytes.length, destination, { burnAfterDownload: true });
   expect(complete.status, complete.text).toBe(200);
@@ -51,7 +62,7 @@ describe("the burn gate (Q-008, phase 3 §17.10)", () => {
       expect(files.status).toBe(403);
       // Everything else is unchanged by the flag.
       expect((await a.call("POST", "/api/v1/texts", { destination: "network", content: "x", burnAfterDownload: false })).status).toBe(201);
-      expect((await a.call("GET", "/api/v1/me/entitlements")).body).toEqual({ plan: "free", features: { burnAfterDownload: false } });
+      await burnEntitlements(a, false);
     } finally {
       await setFlag("free_burn_after_download", true);
     }
@@ -76,7 +87,7 @@ describe("the burn gate (Q-008, phase 3 §17.10)", () => {
 
   it("with the beta flag on, Free creates burn shares; the snapshot records the grant and the audit says burn", async () => {
     const a = await Device.create(newNetwork().ip());
-    expect((await a.call("GET", "/api/v1/me/entitlements")).body).toEqual({ plan: "free", features: { burnAfterDownload: true } });
+    await burnEntitlements(a, true);
     const share = await a.postBurnText("hello");
     const row = await shareRow(share.id);
     expect(row.burn_after_download).toBe(true);

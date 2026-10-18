@@ -59,7 +59,10 @@ export function newNetwork() {
   };
 }
 
-export async function signInAnonymously(): Promise<{ userId: string; accessToken: string; client: SupabaseClient }> {
+/** A signed-in Supabase session: one browser. */
+export type Session = { userId: string; accessToken: string; client: SupabaseClient };
+
+export async function signInAnonymously(): Promise<Session> {
   const client = createClient(stack().supabaseUrl, stack().publishableKey, {
     auth: { persistSession: false, autoRefreshToken: false },
   });
@@ -82,8 +85,15 @@ export class Device {
 
   /** Anonymous sign-in, device registration and a first observe, like the app's bootstrap. */
   static async create(ip: string | null, options: { observe?: boolean } = {}): Promise<Device> {
-    const session = await signInAnonymously();
-    const registered = await api("POST", "/api/v1/devices", { token: session.accessToken, ip, body: {} });
+    return Device.attach(await signInAnonymously(), ip, options);
+  }
+
+  /**
+   * Device registration for a session that already exists (Phase 4: an account's browser, or a
+   * browser after an upgrade). `deviceId` is the X-Device-Id the browser still has, if any.
+   */
+  static async attach(session: Session, ip: string | null, options: { observe?: boolean; deviceId?: string } = {}): Promise<Device> {
+    const registered = await api("POST", "/api/v1/devices", { token: session.accessToken, ip, body: {}, deviceId: options.deviceId });
     if (registered.status !== 200) throw new Error(`device registration failed: ${registered.status} ${registered.text}`);
     const device = new Device(
       session.userId,
@@ -129,8 +139,8 @@ export class Device {
     return response.body.share as { id: string; scope: string; text: { content: string; version: number } | null; burn: Json };
   }
 
-  /** A share link (creator only). Returns the link with its one-time URL and optional code. */
-  async createLink(shareId: string, body: { expiresIn?: number; shortCode?: { expiresIn?: number } } = {}) {
+  /** A share link (creator only). Returns the link with its one-time URL and optional code. Phase 4: an optional password (Pro). */
+  async createLink(shareId: string, body: { expiresIn?: number; shortCode?: { expiresIn?: number }; password?: string } = {}) {
     const response = await this.call("POST", `/api/v1/shares/${shareId}/links`, body);
     if (response.status !== 201) throw new Error(`link creation failed: ${response.status} ${response.text}`);
     const link = response.body.link as LinkCreated;
@@ -198,8 +208,14 @@ export class Viewer {
     return response;
   }
 
-  unlock(linkId: string, secret: string) {
-    return this.call("POST", `/api/v1/links/${linkId}/unlock`, { secret });
+  /** Phase 4 (P4-16): a password link's password may come with the unlock. */
+  unlock(linkId: string, secret: string, extra: { password?: string; turnstileToken?: string } = {}) {
+    return this.call("POST", `/api/v1/links/${linkId}/unlock`, { secret, ...extra });
+  }
+
+  /** Phase 4 (P4-16): prove a password link's password for this browser's grant. */
+  password(linkId: string, password: string, turnstileToken?: string) {
+    return this.call("POST", `/api/v1/links/${linkId}/password`, { password, ...(turnstileToken ? { turnstileToken } : {}) });
   }
 
   content(linkId: string) {

@@ -33,6 +33,16 @@ describe("viewer API client and content", () => {
     }
   });
 
+  // Phase 4 (P4-16): a browser that must prove a (new) password keeps nothing of the share meanwhile.
+  it("treats 409 PASSWORD_REQUIRED the same way: the cached content is replaced and polling stops", async () => {
+    const api = createViewerApiClient(async () => error(409, "PASSWORD_REQUIRED"));
+    const result = await fetchViewerContent(api, "AAAAAAAAAAAAAAAA");
+    expect(result.content).toBeNull();
+    expect(result.ended).toMatchObject({ status: 409, code: "PASSWORD_REQUIRED" });
+    // Any other 409 is not an answer about access: it is rethrown.
+    await expect(fetchViewerContent(createViewerApiClient(async () => error(409, "SOMETHING_ELSE")), "AAAAAAAAAAAAAAAA")).rejects.toMatchObject({ status: 409 });
+  });
+
   it("rethrows other failures so they can be retried", async () => {
     const api = createViewerApiClient(async () => error(503, "REMOTE_LINKS_DISABLED"));
     await expect(fetchViewerContent(api, "AAAAAAAAAAAAAAAA")).rejects.toMatchObject({ status: 503 });

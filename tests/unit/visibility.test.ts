@@ -68,8 +68,46 @@ describe("isShareVisible (03 §3.6, G1)", () => {
     expect(isShareVisible({ ...linkOnly, expiresAt: NOW }, { userId: CREATOR, eligibleSpaceIds: [], now: NOW })).toBe(false);
   });
 
-  it("ignores scopes it doesn't know (room shares arrive in Phase 4)", () => {
-    expect(isShareVisible({ ...share, scope: "room" }, onA)).toBe(false);
-    expect(isShareVisible({ ...share, scope: "room" }, { ...onA, userId: CREATOR })).toBe(false);
+  // Phase 4D (P4-17, deviation DV4-90): room shares exist now. This test asserted that every room share was hidden,
+  // its creator included; the rule now shows one to its room's members and its creator (below). Its intent, that a
+  // scope the rule doesn't know is hidden from everyone, is kept with 'workspace' (Phase 5).
+  it("ignores scopes it doesn't know (workspaces arrive in Phase 5)", () => {
+    expect(isShareVisible({ ...share, scope: "workspace" }, onA)).toBe(false);
+    expect(isShareVisible({ ...share, scope: "workspace" }, { ...onA, userId: CREATOR })).toBe(false);
+  });
+});
+
+describe("isShareVisible for room shares (phase 4 §17.8.4, P4-17)", () => {
+  const ROOM = "33333333-3333-4333-8333-333333333333";
+  const OTHER_ROOM = "44444444-4444-4444-8444-444444444444";
+  const roomShare: VisibleShareFields = { ...share, scope: "room", networkSpaceId: null, roomId: ROOM };
+
+  it("shows a room share to the room's active members, from any network", () => {
+    expect(isShareVisible(roomShare, { userId: OTHER, eligibleSpaceIds: [], roomIds: [ROOM], now: NOW })).toBe(true);
+    expect(isShareVisible(roomShare, { userId: OTHER, eligibleSpaceIds: [SPACE_B], roomIds: [ROOM], now: NOW })).toBe(true);
+  });
+
+  it("hides it from everyone else: other rooms' members, non-members on any network (G-R1)", () => {
+    expect(isShareVisible(roomShare, { userId: OTHER, eligibleSpaceIds: [SPACE_A], roomIds: [OTHER_ROOM], now: NOW })).toBe(false);
+    expect(isShareVisible(roomShare, onA)).toBe(false);
+    // Even if a room share ever carried a space ID, the network part of the rule never applies to it.
+    expect(isShareVisible({ ...roomShare, networkSpaceId: SPACE_A }, onA)).toBe(false);
+  });
+
+  it("never shows a network share through a room", () => {
+    expect(isShareVisible({ ...share, roomId: ROOM }, { userId: OTHER, eligibleSpaceIds: [], roomIds: [ROOM], now: NOW })).toBe(false);
+  });
+
+  it("shows its creator their room share, also after they left the room (D4-15); uploads in progress only to them", () => {
+    expect(isShareVisible(roomShare, { userId: CREATOR, eligibleSpaceIds: [], roomIds: [], now: NOW })).toBe(true);
+    const pending = { ...roomShare, status: "pending_upload" };
+    expect(isShareVisible(pending, { userId: OTHER, eligibleSpaceIds: [], roomIds: [ROOM], now: NOW })).toBe(false);
+    expect(isShareVisible(pending, { userId: CREATOR, eligibleSpaceIds: [], now: NOW })).toBe(true);
+  });
+
+  it("hides expired and ended room shares from members too", () => {
+    const member: VisibilityContext = { userId: OTHER, eligibleSpaceIds: [], roomIds: [ROOM], now: NOW };
+    expect(isShareVisible({ ...roomShare, expiresAt: NOW }, member)).toBe(false);
+    for (const status of ["expired", "deleted", "blocked", "failed"]) expect(isShareVisible({ ...roomShare, status }, member)).toBe(false);
   });
 });

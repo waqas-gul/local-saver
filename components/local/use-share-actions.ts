@@ -23,6 +23,8 @@ export function useShareActions(share: ShareDto): ShareActions {
       void queryClient.invalidateQueries({ queryKey: queryKeys.local() });
       void queryClient.invalidateQueries({ queryKey: queryKeys.myShares() });
       void queryClient.invalidateQueries({ queryKey: queryKeys.share(share.id) });
+      // Phase 4 (P4-17): a room share is also in its room's feed.
+      if (share.room) void queryClient.invalidateQueries({ queryKey: queryKeys.roomShares(share.room.id) });
     };
     const onGone = (error: unknown) => {
       if (error instanceof ApiRequestError && (error.status === 410 || error.status === 404)) {
@@ -78,5 +80,5 @@ export function useShareActions(share: ShareDto): ShareActions {
       },
       reload: refresh,
     };
-  }, [runtime, queryClient, share.id, share.burn]);
+  }, [runtime, queryClient, share.id, share.burn, share.room]);
 }

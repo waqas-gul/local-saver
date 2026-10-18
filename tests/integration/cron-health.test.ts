@@ -20,8 +20,11 @@ describe("GET /api/v1/health/cron", () => {
     expect(health.body).toEqual(expected);
     expect(health.status).toBe(expected.status === "ok" ? 200 : 503);
     expect(health.headers.get("cache-control")).toBe("no-store");
+    // Phase 4C (§17.12.3, deviation DV4-35): billingReconcile and billingWebhooks join the Phase 3 checks.
+    // Phase 4D (§17.12.3, P4-15): so does extensions.
     expect(Object.keys(health.body.checks).sort()).toEqual(
-      ["burnFinalize", "egressLists", "heartbeat", "janitorBacklog", "janitorFailures", "janitorVolume", "jobs", "reconcile", "storageDrift"],
+      ["billingReconcile", "billingWebhooks", "burnFinalize", "egressLists", "extensions", "heartbeat", "janitorBacklog", "janitorFailures", "janitorVolume",
+       "jobs", "reconcile", "storageDrift"],
     );
     expect(health.text).not.toMatch(/[0-9]/);
     // Not an egress-list deployment (APP_ENV=test): the lists aren't required here.

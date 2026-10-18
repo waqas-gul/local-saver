@@ -3,6 +3,7 @@
 import { QueryClientProvider } from "@tanstack/react-query";
 import { setNonce } from "get-nonce";
 import type { ReactNode } from "react";
+import { AuthRuntimeProvider } from "./auth-runtime";
 import { ConfigProvider, type PublicConfig } from "./config";
 import { getQueryClient } from "./query-client";
 import { RuntimeProvider } from "./runtime";
@@ -53,4 +54,13 @@ export function AppProviders({ children }: { children: ReactNode }) {
 
 export function ViewerProviders({ children }: { children: ReactNode }) {
   return <QueryClientProvider client={getQueryClient()}>{children}</QueryClientProvider>;
+}
+
+/**
+ * AuthProviders (sign-in pages, Phase 4 C4-1): the Supabase client and an API client, but no
+ * bootstrap, so visiting /login never creates an anonymous user. No query cache: these pages hold
+ * no server state worth caching, and the app's cache is cleared when the user changes.
+ */
+export function AuthProviders({ children }: { children: ReactNode }) {
+  return <AuthRuntimeProvider>{children}</AuthRuntimeProvider>;
 }

@@ -44,6 +44,8 @@ const LOCAL = {
   // Must match the storage_janitor_secret Vault entry in supabase/seed.sql.
   janitorTriggerSecret: "local-only-janitor-trigger-secret-0000000000000001",
   janitorUrl: "http://127.0.0.1:54321/functions/v1/storage-janitor",
+  // Phase 4C: must match the billing_reconcile_secret Vault entry in supabase/seed.sql.
+  billingReconcileSecret: "local-only-billing-reconcile-secret-00000000000001",
 };
 
 /** Settings for the storage-janitor function, as it sees the stack from inside Docker. */
@@ -73,7 +75,9 @@ function supabaseStatus() {
   const publishableKey = json.PUBLISHABLE_KEY;
   const secretKey = json.SECRET_KEY;
   if (!url || !publishableKey || !secretKey) throw new Error("Supabase is not running (pnpm stack:start)");
-  return { url, publishableKey, secretKey };
+  // Phase 4: the local mail catcher, where tests read sign-in codes (null if it was excluded).
+  const mailpitUrl = json.MAILPIT_URL ?? json.INBUCKET_URL ?? null;
+  return { url, publishableKey, secretKey, mailpitUrl };
 }
 
 function s3() {

@@ -38,6 +38,37 @@ export function linkExpired(): ApiError {
 }
 
 /**
+ * Phase 4 (P4-16): a password link, and this grant hasn't proved its current password. Only after the
+ * secret or a code (or a grant) is proven; the link ID lets the code page send the browser to the prompt.
+ */
+export function passwordRequired(linkId: string): ApiError {
+  return new ApiError(409, "PASSWORD_REQUIRED", "This link needs a password", { linkId });
+}
+
+/** The same error with response headers added (a viewer session cookie issued before the refusal). */
+export function withHeaders(error: ApiError, headers: Record<string, string>): ApiError {
+  return new ApiError(error.status, error.code, error.message, error.details, { ...error.headers, ...headers });
+}
+
+/**
+ * Phase 4 (P4-17): a member (who can see the room) asked for an owner's action. Anyone who isn't a member gets the
+ * plain 404 instead, as for a room that doesn't exist (§17.11.2).
+ */
+export function notOwner(): ApiError {
+  return new ApiError(403, "NOT_OWNER", "Only the room's owner can do this");
+}
+
+/** Phase 4 (P4-17): an unknown invite, a wrong secret or a malformed one, all the same (§17.8.4.1). */
+export function inviteUnavailable(): ApiError {
+  return new ApiError(404, "INVITE_UNAVAILABLE", "This invite isn't available");
+}
+
+/** Only after the secret is proven: the invite expired, was used up or revoked, or its room was deleted. */
+export function inviteExpired(): ApiError {
+  return new ApiError(410, "INVITE_EXPIRED", "This invite has expired or was turned off");
+}
+
+/**
  * Burn after download (Phase 3, DEC-015): someone already downloaded this share. Only callers who
  * could have opened it get this; byYou tells the claimant that it was them.
  */

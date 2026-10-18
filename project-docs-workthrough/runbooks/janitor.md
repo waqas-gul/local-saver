@@ -17,11 +17,13 @@ storage-janitor         →  app.janitor_claim_hold_copies: copy each held objec
                         →  app.janitor_claim_deletions(≤ 100): guard rails, 2-minute lock (SKIP LOCKED)
                         →  R2: tombstone (an upload URL may be live) or DeleteObject
                         →  app.janitor_finish_deletion: deleted / tombstoned / failed (backoff) / dry_run
+                        →  app.janitor_claim_extension_copies (Phase 4D): copy an extended share's objects (§7)
 ```
 
 - **Guard rails** (in SQL, so every janitor obeys them):
   - the key must have the generated format;
   - no file of an open share (`pending_upload`, `active`, `claimed`) may use it;
+  - (Phase 4D) it must not be a key of an extension still pending or copied (`extension_pending`, §7);
   - the row must not be on legal hold.
 - **Refused rows:**
   - are parked for a day with `last_error = 'guard:<reason>'`;
@@ -142,7 +144,7 @@ select count(*) from app.object_deletions where completed_at is null and not leg
 1. **Read the function's logs.** Supabase dashboard → Edge Functions → storage-janitor → Logs. Events: `janitor.run`, `janitor.delete_failed`, `janitor.failing`, `janitor.guard_refused`, `janitor.run_failed`, `janitor.disabled`, `janitor.hold_copied`, `janitor.hold_copy_failed`, `janitor.hold_source_missing` (§6).
 2. **`guard_refused`: stop.**
    - Switch the janitor off: `update app.runtime_flags set enabled = false, updated_by = '<you>', note = '<why>' where key = 'storage_janitor_enabled';`
-   - Find how a row for an open share's object got into the outbox. Every legitimate row comes from `end_share`, an upload rejection, `fail_stale_uploads` or reconciliation.
+   - Find how a row for an open share's object got into the outbox. Every legitimate row comes from `end_share`, an upload rejection, `fail_stale_uploads`, reconciliation or (Phase 4D) an extension's swap, failure or cancellation (§7).
    - **Never complete a refused row by hand.** Delete it only once the cause is understood and fixed. Then switch the janitor back on.
 3. **R2 errors (`s3:5xx`, network errors):**
    - Leave backoff to work and watch the backlog.
@@ -169,7 +171,7 @@ select count(*) from app.object_deletions where completed_at is null and not leg
 ## 5. Reconciliation (weekly)
 
 - **Schedule:** `reconcile-r2-orphans` runs Sunday 05:06 UTC and opens a run in `app.storage_reconcile_runs`. While the run is open, the minute trigger keeps posting `{"mode":"reconcile"}`. Each invocation lists up to 20 pages of 1,000 keys and saves its cursor.
-- **Orphans** are queued as outbox rows with reason `orphan`, then deleted through §1 with every guard rail. An orphan is a well-formed key, no pending or verified file, last modified more than 48 hours ago, and no open row.
+- **Orphans** are queued as outbox rows with reason `orphan`, then deleted through §1 with every guard rail. An orphan is a well-formed key, no pending or verified file, last modified more than 48 hours ago, no open row, and (Phase 4D) not a key of a pending or copied extension (§7).
 - **Unknown keys** are only counted (`reconcile.unknown_key`), never queued.
 - **Hold copies** (`hold/<key>`) are only counted (`holdCopies`), never queued.
 - **Missing objects:** a verified file of an open share with no object gets `files.object_missing_at`, logged as `reconcile.missing_object` at error level. Investigate each one: it means lost data, a restore, or a manual deletion.
@@ -193,3 +195,20 @@ select count(*) from app.object_deletions where completed_at is null and not leg
 
   This writes `admin.release_hold` to the audit log. The janitor deletes the objects and their `hold/` copies on its next run.
 - **Real R2 is not yet tested.** That the lifecycle rules spare `hold/` is tested against the rule file and RustFS only. Confirm it on staging ([manual procedure](../phases/phase-3-manual-verification.md) S-6) before relying on it for real evidence. Exporting evidence out of R2 is still a matter for the legal procedure (Q-022).
+
+## 7. Extension copies (Phase 4D, P4-15)
+
+- **What they are.** A Pro creator extending a share beyond what its objects' lifecycle class allows gets one `app.share_extension_files` row per file. Each run, after its deletions, the janitor claims due rows (10-minute lock, in waves of 8), copies the object to its new key (`d30/` or `d90/`, today's date, a fresh UUID) and checks the copy's size with HEAD. When the share's last copy is recorded, the database swaps the files to the new keys, sets the new expiry and queues the old keys as `superseded` (5 minutes later, through §1). Copies are made in dry runs too.
+- **Guard rails** on the copy claim: generated keys; the share still open with the extension pending; the file still at the old key; no file using the new key; no deletion queued for either key. A refused row is parked for a day with `last_error = 'guard:<reason>'` and shows as `janitorFailures: guard_refused`. Treat it like §4 step 2: something wrote an inconsistent row.
+- **Failures** back off as in §1. The fifth ends the extension (`janitor.extension_failed`, error): the share keeps its expiry and keys, the creator sees that it failed, and the new keys go to the outbox as `extension_cancelled`. `/health/cron` shows `janitorFailures: failing` for 24 hours. `janitor.extension_copy_failed` with `source_missing` (error) means a verified file's object is gone: investigate it like a missing object (§5).
+- **Stuck:** `extensions: stuck` means a row has been pending for over 6 hours. Usually the janitor is off or failing (§4 step 5); otherwise look at the row's `last_error`. A share that expires meanwhile cancels its extension by itself.
+- **Queries:**
+
+  ```sql
+  -- Extensions in progress, refused and failed.
+  select e.id, e.share_id, e.status, e.new_retention_class, e.attempts, e.last_error, e.not_before, e.locked_until, e.created_at
+    from app.share_extension_files e where e.status in ('pending', 'copied') or (e.status = 'failed' and e.finished_at > now() - interval '7 days')
+   order by e.created_at;
+  ```
+
+- **Never** change a row's status to `copied` by hand: the swap would point files at keys nobody checked. To give up on an extension, let it fail or end the share; both queue the new keys for deletion.
