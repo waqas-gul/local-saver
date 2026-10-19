@@ -69,7 +69,7 @@ Each spike has a time box and writes a report to `project-docs-workthrough/spike
 - **Question:** do the auth and realtime designs work with Next.js 16?
 - **Method:**
   - Turnstile-protected `signInAnonymously`.
-  - `@supabase/ssr` cookie sessions with `proxy.ts` refresh.
+  - The browser-held session sent as a bearer access token and verified on the server (as built in Phase 1, DV1-14; planned originally: `@supabase/ssr` cookie sessions with `proxy.ts` refresh).
   - Server-side JWT verification (`getClaims`/JWKS): API shape and latency.
   - A private channel with an RLS policy on `realtime.messages` calling an `app_realtime` `SECURITY DEFINER` helper.
   - Client broadcast denied, presence allowed.
@@ -300,7 +300,7 @@ GitHub remote and branch protection (AC-0.1), domain and Cloudflare zone (Q-020)
 
 | AC | Status | Evidence / what is missing |
 |---|---|---|
-| AC-0.1 | ❌ Not met | Local branch is `main`; CI workflow exists, and every command of its three jobs passes locally (2026-09-29), including the generated-types drift check. **Needs the owner:** GitHub remote, branch protection, first green CI run. |
+| AC-0.1 | ❌ Not met | Branch `main` is on the GitHub remote. Every command of the CI jobs passes locally (2026-09-29), including the generated-types drift check. CI's only run, on the push of this commit to `main` (2026-09-29), failed at `pnpm typecheck` (`Cannot find name 'LayoutProps'`); its database and build/E2E jobs passed. The current workflow has not run since. **Needs the owner:** branch protection and a first green CI run. |
 | AC-0.2 | ◐ Partial | Frozen-lockfile install and build succeed locally with pinned Node 22 / pnpm 12.4.2. CI and host runs pending (AC-0.1, SP-01). |
 | AC-0.3 | ◐ Partial | Headers and nonce CSP verified locally by E2E (CSP incl. `style-src-attr` per F-7, `nosniff`, `frame-ancestors 'none'`, referrer policy, no `X-Powered-By`). Staging behind Cloudflare Access doesn't exist yet. |
 | AC-0.4 | ◐ Partial | Origin lock verified locally against a real `next start` process (E2E: 403 without or with a forged secret on pages, API and static files; 200 with it). The host part is SP-01. |

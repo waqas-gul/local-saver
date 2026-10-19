@@ -19,7 +19,7 @@ env:
 
 jobs:
   checks:
-    name: Typecheck, lint, unit tests, audit
+    name: Typecheck, lint, unit and component tests, audit
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -36,10 +36,12 @@ jobs:
       - name: Dependency audit (fail on high or critical)
         run: pnpm audit --audit-level high
 
-  database:
-    name: Database migrations and pgTAP
+  stack:
+    # Everything that needs the local stack: Supabase (Postgres, Auth, Realtime) and RustFS
+    # standing in for R2 (phase 1 DV1-4).
+    name: Database, API integration and E2E
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -48,30 +50,20 @@ jobs:
           node-version-file: .node-version
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - name: Start local Postgres and apply migrations
-        run: pnpm exec supabase db start
+      - name: Start the local stack (applies migrations and seed)
+        run: pnpm stack:start
       - name: pgTAP tests
         run: pnpm exec supabase test db
       - name: Generated database types are up to date
         run: |
           pnpm db:types
           git diff --exit-code lib/server/db/types.gen.ts
-
-  e2e:
-    name: Build and E2E smoke tests
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version-file: .node-version
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
       - run: pnpm build
-      - run: pnpm exec playwright install --with-deps chromium
-      - run: pnpm test:e2e
+      - name: API integration tests (T-001 … T-049, IDOR matrix, Realtime)
+        run: pnpm test:integration
+      - run: pnpm exec playwright install --with-deps chromium webkit
+      - name: E2E (Phase 0 smoke and Phase 1 multi-device)
+        run: pnpm test:e2e
       - uses: actions/upload-artifact@v4
         if: failure()
         with:

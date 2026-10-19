@@ -1,0 +1,17 @@
+{{- /* Supabase Auth: confirming a sensitive action (reauthenticate). Supabase gives this email a code only, no link.
+The app itself asks for a sign-in code instead (P4-22's deletion); this template covers Supabase's own step-up.
+Phase 4 §17.5.8, P4-23. Copy: OWNER REVIEW. */ -}}
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+</head>
+<body style="font-family: system-ui, sans-serif; line-height: 1.5">
+<h2>Confirm it's you</h2>
+<p>Your confirmation code is:</p>
+<p style="font-size: 24px; font-weight: bold; letter-spacing: 4px">{{ .Token }}</p>
+<p>Enter it on the page where you asked for it. It expires in 1 hour.</p>
+<p>If you didn't ask for this, someone may be trying to use your account. Don't share this code.</p>
+</body>
+</html>

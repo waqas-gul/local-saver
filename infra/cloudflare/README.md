@@ -49,9 +49,13 @@ On a VPS, prefer **Cloudflare Tunnel** so the origin has no public ingress at al
 
 - **Cloudflare Access** protects the whole staging hostname. Create a service token for CI smoke tests.
 
-## 6. Turnstile (Phase 1)
+## 6. Turnstile (Phase 1, Phase 2)
 
-- One widget per environment, restricted to that environment's hostnames. Site key → `NEXT_PUBLIC_TURNSTILE_SITE_KEY`, secret → `TURNSTILE_SECRET_KEY`.
+- One widget per environment, restricted to that environment's hostnames.
+- Site key → `NEXT_PUBLIC_TURNSTILE_SITE_KEY` in the app's environment.
+- Secret key → the Supabase project's **Auth captcha settings** (provider Turnstile). Supabase Auth verifies the token at anonymous sign-in.
+- **From Phase 2**, the same secret key also → `TURNSTILE_SECRET_KEY` in the app's environment: the server verifies its own challenges (repeated wrong share codes, abuse reports) and checks that the token was solved on this environment's hostname. The app refuses to start in staging or production without it.
+- Share and code pages (`/s/*`, `/c`) and their API routes must be reachable by link viewers; if Cloudflare Access protects staging, the testers' phones must pass it too.
 
 ## 7. Conditional rules (decided by SP-04)
 

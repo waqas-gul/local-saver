@@ -23,10 +23,13 @@ export type ClientIpResult =
     };
 
 export function resolveClientIp(headers: Headers, env: Env): ClientIpResult {
+  const ipv6PrefixLength = env.NETWORK_IPV6_PREFIX_LEN;
+
   if (env.testClientIpAllowed) {
-    const override = headers.get(TEST_CLIENT_IP_HEADER);
+    // TEST_CLIENT_IP_DEFAULT lets local browsers, which connect from 127.0.0.1, share one network.
+    const override = headers.get(TEST_CLIENT_IP_HEADER) ?? env.testClientIpDefault ?? null;
     if (override !== null) {
-      const result = normalizeClientIp(override, { allowDocumentationRanges: true });
+      const result = normalizeClientIp(override, { allowDocumentationRanges: true, ipv6PrefixLength });
       return result.ok
         ? { status: "ok", ip: result.value, source: "test-override" }
         : { status: "unavailable", reason: result.reason };
@@ -44,7 +47,7 @@ export function resolveClientIp(headers: Headers, env: Env): ClientIpResult {
   const value = headers.get(CLOUDFLARE_IP_HEADER);
   if (value === null) return { status: "unavailable", reason: "missing_header" };
 
-  const result = normalizeClientIp(value);
+  const result = normalizeClientIp(value, { ipv6PrefixLength });
   return result.ok
     ? { status: "ok", ip: result.value, source: "cloudflare" }
     : { status: "unavailable", reason: result.reason };

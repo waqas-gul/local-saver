@@ -70,16 +70,23 @@ export function buildDocumentCsp(options: CspOptions): string {
   return directives.join("; ");
 }
 
-const NO_REFERRER_ROUTES = /^\/(s|j|c)(\/|$)/;
-const NOINDEX_ROUTES = /^\/(s|j|c|rooms|api)(\/|$)/;
+// Phase 4: the sign-in pages too. The callback URL carries a one-time PKCE code (§17.5.2).
+const NO_REFERRER_ROUTES = /^\/(s|j|c|login|auth)(\/|$)/;
+const NOINDEX_ROUTES = /^\/(s|j|c|rooms|api|login|auth)(\/|$)/;
 
 export function isApiPath(pathname: string): boolean {
   return pathname === "/api" || pathname.startsWith("/api/");
 }
 
-/** Static assets and files served by Next.js: no document CSP needed. */
+/** Files that are never HTML: build assets and the app's metadata files. */
+const PUBLIC_FILES = new Set(["/favicon.ico", "/robots.txt"]);
+
+/**
+ * Static assets that need no document CSP. Anything else keeps it, even a path that looks
+ * like a file, because it may render a page (for example the 404 page).
+ */
 export function isAssetPath(pathname: string): boolean {
-  return pathname.startsWith("/_next/") || /\.[a-z0-9]+$/i.test(pathname.split("/").pop() ?? "");
+  return pathname.startsWith("/_next/") || PUBLIC_FILES.has(pathname);
 }
 
 export function securityHeaders(pathname: string, options: { https: boolean }): Record<string, string> {
@@ -93,6 +100,7 @@ export function securityHeaders(pathname: string, options: { https: boolean }): 
   };
   if (options.https) headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains";
   if (NOINDEX_ROUTES.test(pathname)) headers["X-Robots-Tag"] = "noindex, nofollow";
-  if (isApiPath(pathname)) headers["Cache-Control"] = "no-store";
+  // API responses, and share, invite and code pages: never stored by a browser or a proxy (T-047).
+  if (isApiPath(pathname) || NO_REFERRER_ROUTES.test(pathname)) headers["Cache-Control"] = "no-store";
   return headers;
 }

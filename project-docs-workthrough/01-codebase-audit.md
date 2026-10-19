@@ -161,7 +161,7 @@ Source: bundled docs in `node_modules/next/dist/docs/` (version 16.3.5). These o
 
 | Topic | What the bundled docs say | Design consequence |
 |---|---|---|
-| `middleware` → `proxy` | `middleware.ts` is deprecated and renamed to `proxy.ts`. The proxy runtime is **Node.js only**. Proxy "should not be used as a full session management or authorization solution". | Use `proxy.ts` only for security headers, CSP nonces, origin lock and session-cookie refresh. All authorization happens in route handlers and services. |
+| `middleware` → `proxy` | `middleware.ts` is deprecated and renamed to `proxy.ts`. The proxy runtime is **Node.js only**. Proxy "should not be used as a full session management or authorization solution". | Use `proxy.ts` only for security headers, CSP nonces and the origin lock. All authorization happens in route handlers and services. (Session-cookie refresh was planned here too; as built in Phase 1, the browser refreshes its own session and the server only verifies the bearer access token: DV1-6, DV1-14.) |
 | Async Request APIs | `cookies()`, `headers()`, `draftMode()`, `params`, `searchParams` are async-only. | All server code awaits them. Use the `PageProps`/`LayoutProps`/`RouteContext` helpers. |
 | Client IP | `NextRequest.ip` and `geo` were removed in v15. | The client IP must come from a **trusted proxy header**, and only when the proxy chain is controlled (DEC-004). |
 | Server Actions | Reachable by direct POST. Default body limit 1 MB. Origin is compared with Host, but **"a request that carries no `Origin` header at all is allowed through with a warning"**. Actions are queued sequentially. | Server Actions are not the primary API. Use versioned JSON route handlers with explicit authentication, Origin checks, validation and rate limits (DEC-008). |
@@ -172,7 +172,7 @@ Source: bundled docs in `node_modules/next/dist/docs/` (version 16.3.5). These o
 | Environment variables | Server-only by default. `NEXT_PUBLIC_*` values are inlined at build. Reading env at runtime needs dynamic rendering or `connection()`. | Validate env at boot. Keep public config minimal (Supabase URL, publishable key, Turnstile site key). |
 | Data security guide | Recommends a server-only **Data Access Layer** returning minimal DTOs, `import 'server-only'`, and React taint APIs as an extra layer. | Adopt a DAL under `lib/server/**`. DTO mappers never return raw rows. |
 | `next/image` (v16 defaults) | Local-IP optimization blocked, `qualities: [75]`, `minimumCacheTTL` 4 h, max 3 redirects. | Don't use image optimization for user uploads (TD-07). |
-| Runtime and browsers | Node ≥ 20.9. TypeScript ≥ 5.1. Chrome/Edge/Firefox 111+, Safari 16.4+. | Pin the host's Node version. Communicate browser support (Q-019). |
+| Runtime and browsers | Node ≥ 20.9. TypeScript ≥ 5.1. Next.js 16 supports Chrome/Edge/Firefox 111+ and Safari 16.4+; with Tailwind CSS 4 (DEC-035) the app needs **Firefox 128+** (Q-019). | Pin the host's Node version. Communicate browser support (Q-019). |
 | Tooling | `next lint` removed. Turbopack is the default for dev and build. `next dev` and `next build` use separate output directories. | CI calls `eslint` directly. No webpack customizations. |
 | Cache Components | Opt-in `cacheComponents: true`. Enables PPR and the `use cache` model. Requires the Node runtime. | Not needed for an app that is almost entirely per-user and dynamic. Revisit for marketing pages (Phase 6). |
 

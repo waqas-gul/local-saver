@@ -5,6 +5,20 @@ import nextTs from "eslint-config-next/typescript";
 const eslintConfig = defineConfig([
   ...nextVitals,
   ...nextTs,
+  // CommonJS helper scripts (shared with the Playwright config, which loads CommonJS).
+  {
+    files: ["scripts/**/*.cjs"],
+    rules: { "@typescript-eslint/no-require-imports": "off" },
+  },
+  // Names starting with "_" are intentionally unused (ignored parameters, omitted fields).
+  {
+    rules: {
+      "@typescript-eslint/no-unused-vars": [
+        "warn",
+        { argsIgnorePattern: "^_", varsIgnorePattern: "^_", destructuredArrayIgnorePattern: "^_", ignoreRestSiblings: true },
+      ],
+    },
+  },
   // Server-only code (secrets, database, authorization) must never reach the browser.
   // Every lib/server module also imports "server-only", which fails the build if a
   // client component imports it; this rule catches it earlier, in the editor.

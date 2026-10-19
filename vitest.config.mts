@@ -39,6 +39,21 @@ export default defineConfig({
           name: "component",
           environment: "jsdom",
           include: ["tests/component/**/*.test.tsx"],
+          setupFiles: ["tests/component/setup.ts"],
+        },
+      },
+      {
+        // API integration against a real `next start` server and the local stack (DV1-12).
+        // Needs `pnpm build` and `pnpm stack:start` first.
+        extends: true,
+        test: {
+          name: "integration",
+          environment: "node",
+          include: ["tests/integration/**/*.test.ts"],
+          globalSetup: ["tests/integration/support/global-setup.ts"],
+          fileParallelism: false,
+          testTimeout: 30_000,
+          hookTimeout: 120_000,
         },
       },
     ],

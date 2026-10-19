@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { API_CSP, buildDocumentCsp, generateNonce, securityHeaders } from "@/lib/server/security/headers";
+import { API_CSP, buildDocumentCsp, generateNonce, isAssetPath, securityHeaders } from "@/lib/server/security/headers";
 
 function directives(csp: string) {
   return Object.fromEntries(
@@ -69,6 +69,20 @@ describe("buildDocumentCsp", () => {
   });
 });
 
+describe("isAssetPath", () => {
+  it("skips the document CSP only for build assets and known public files", () => {
+    expect(isAssetPath("/_next/static/chunks/a.js")).toBe(true);
+    expect(isAssetPath("/favicon.ico")).toBe(true);
+    expect(isAssetPath("/robots.txt")).toBe(true);
+  });
+
+  it("keeps the CSP on any other path, even one that looks like a file (it may render a page)", () => {
+    expect(isAssetPath("/uploads.x")).toBe(false);
+    expect(isAssetPath("/anything/evil.html")).toBe(false);
+    expect(isAssetPath("/")).toBe(false);
+  });
+});
+
 describe("generateNonce", () => {
   it("returns a fresh base64 value each time", () => {
     const a = generateNonce();
@@ -102,8 +116,27 @@ describe("securityHeaders", () => {
     expect(h["X-Robots-Tag"]).toBe("noindex, nofollow");
   });
 
+  it.each(["/s/abc", "/c"])("never lets %s be cached (T-047)", (path) => {
+    expect(securityHeaders(path, { https: false })["Cache-Control"]).toBe("no-store");
+  });
+
+  // Phase 4 (§17.5.2): the callback URL carries a one-time PKCE code; the sign-in pages are private.
+  it.each(["/login", "/auth/callback"])("keeps %s out of referrers, caches and search engines", (path) => {
+    const h = securityHeaders(path, { https: false });
+    expect(h["Referrer-Policy"]).toBe("no-referrer");
+    expect(h["Cache-Control"]).toBe("no-store");
+    expect(h["X-Robots-Tag"]).toBe("noindex, nofollow");
+  });
+
+  it("does not treat look-alike paths as sign-in routes", () => {
+    expect(securityHeaders("/loginx", { https: false })["Referrer-Policy"]).toBe("strict-origin-when-cross-origin");
+    expect(securityHeaders("/authors", { https: false })["Cache-Control"]).toBeUndefined();
+  });
+
   it("does not treat look-alike paths as share routes", () => {
     expect(securityHeaders("/settings", { https: false })["Referrer-Policy"]).toBe("strict-origin-when-cross-origin");
+    expect(securityHeaders("/sitemap", { https: false })["Cache-Control"]).toBeUndefined();
+    expect(securityHeaders("/code", { https: false })["Referrer-Policy"]).toBe("strict-origin-when-cross-origin");
   });
 
   it("marks API responses no-store and noindex, with a locked-down CSP", () => {

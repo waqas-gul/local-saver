@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
+import { IntegrationNotConfiguredError } from "@/lib/server/config/integrations";
 import { resetEnvCache } from "@/lib/server/env";
 import { ApiError } from "@/lib/server/http/errors";
 import { withApi } from "@/lib/server/http/handler";
@@ -81,6 +82,65 @@ describe("withApi", () => {
     expect(text).not.toContain("hunter2");
   });
 
+  // P4-21: a merge or an account deletion took the caller's user away while its write ran.
+  it("answers a write whose own user went away mid-request as the next request would (401 DEVICE_UNKNOWN); other FK errors stay 500", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const fkError = (constraint: string, table: string) =>
+      Object.assign(new Error(`insert or update violates foreign key constraint "${constraint}"`), {
+        code: "23503",
+        constraint,
+        detail: `Key (x)=(00000000-0000-4000-8000-000000000000) is not present in table "${table}".`,
+      });
+    const gone = await withApi(async () => {
+      throw fkError("room_members_user_id_fkey", "users");
+    })(post("{}"), undefined);
+    expect(gone.status).toBe(401);
+    expect((await gone.json()).error.code).toBe("DEVICE_UNKNOWN");
+    const other = await withApi(async () => {
+      throw fkError("downloads_share_id_fkey", "shares");
+    })(post("{}"), undefined);
+    expect(other.status).toBe(500);
+  });
+
+  it("accepts a body-less DELETE from an allowed Origin without a content type (DV1-13)", async () => {
+    const handler = withApi(async () => new Response(null, { status: 204 }));
+    const ok = await handler(new Request(`${ORIGIN}/api/v1/test`, { method: "DELETE", headers: { origin: ORIGIN } }), undefined);
+    expect(ok.status).toBe(204);
+    const foreign = await handler(
+      new Request(`${ORIGIN}/api/v1/test`, { method: "DELETE", headers: { origin: "https://evil.example" } }),
+      undefined,
+    );
+    expect(foreign.status).toBe(403);
+    const withForm = await handler(
+      new Request(`${ORIGIN}/api/v1/test`, {
+        method: "DELETE",
+        headers: { origin: ORIGIN, "content-type": "application/x-www-form-urlencoded" },
+        body: "a=1",
+      }),
+      undefined,
+    );
+    expect(withForm.status).toBe(415);
+  });
+
+  it("sends headers attached to an ApiError, such as Retry-After", async () => {
+    const handler = withApi(async () => {
+      throw new ApiError(429, "RATE_LIMITED", "Too many requests", undefined, { "Retry-After": "17" });
+    });
+    const response = await handler(new Request(`${ORIGIN}/api/v1/test`), undefined);
+    expect(response.status).toBe(429);
+    expect(response.headers.get("retry-after")).toBe("17");
+  });
+
+  it("answers 503 when an integration is not configured, naming no secrets", async () => {
+    const handler = withApi(async () => {
+      throw new IntegrationNotConfiguredError("R2", ["R2_BUCKET"]);
+    });
+    const response = await handler(new Request(`${ORIGIN}/api/v1/test`), undefined);
+    expect(response.status).toBe(503);
+    expect((await response.json()).error.code).toBe("SERVICE_NOT_CONFIGURED");
+  });
+
   it("passes Response objects through and adds the standard headers", async () => {
     const handler = withApi(async () => new Response("plain", { status: 202 }));
     const response = await handler(new Request(`${ORIGIN}/api/v1/test`), undefined);
@@ -105,6 +165,25 @@ describe("readJson", () => {
     const error = await readJson(post(JSON.stringify({ name: "", secret: "hunter2" })), schema).catch((e) => e);
     expect(error).toMatchObject({ status: 400, code: "VALIDATION_FAILED" });
     expect(JSON.stringify(error.details)).not.toContain("hunter2");
+  });
+
+  it("stops reading a streamed body without Content-Length once it passes the limit", async () => {
+    let pulled = 0;
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulled++;
+        if (pulled > 1000) controller.close();
+        else controller.enqueue(new Uint8Array(1024));
+      },
+    });
+    const request = new Request(`${ORIGIN}/api/v1/test`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: stream,
+      duplex: "half",
+    } as RequestInit);
+    await expect(readJson(request, schema, { maxBytes: 4096 })).rejects.toMatchObject({ status: 413 });
+    expect(pulled).toBeLessThan(20);
   });
 
   it("returns 413 for bodies above the limit", async () => {

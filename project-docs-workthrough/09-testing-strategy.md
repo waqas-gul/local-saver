@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Document status | PROPOSED |
-| Last updated | 2026-09-23 (CR-001; Phase 0 test harness implemented) |
+| Last updated | 2026-10-18 (Phase 4, P4-26: §4.14 the final run; §7 what CI must settle before running Phase 4; §8 the Phase 4 procedure written; §9 Phase 4's state). 2026-10-18 (Phase 4, P4-25: §4.14 Phase 4 test map with the mutation checks, the latest full run and the known flaky tests; §4.10 points to it; §5 matrix actors as built; §7 CI has not run Phase 4; §8, §9 the Phase 4 procedure is P4-26's; §2 RustFS and the `room:` topic). 2026-10-16 (§4.12: report copy makes no review promise, owner decision on abuse notification). 2026-10-15 (Phase 2 suites implemented: §4.12 test map, §5 matrix actors as built, §8 Phase 2 manual procedure). Earlier the same day: Phase 1 suites, §3 as built, §4.11 test map; RustFS instead of MinIO |
 | Applies to | All phases. Each phase document lists which tests from this catalogue it must deliver. |
 
 ---
@@ -13,7 +13,7 @@
 1. **Test-first** for services, SQL functions and every security-critical rule (authorization, claims, quotas, tokens).
 2. **Every authorization rule has positive and negative tests.** Access-denied tests matter more than happy paths.
 3. **Real Postgres for authorization and concurrency.** No database mocks for policy logic. Use the local Supabase stack.
-4. **Storage:** unit tests mock the S3 client. Integration tests use MinIO. **Nightly contract tests against a real R2 staging bucket** cover R2-specific behaviour.
+4. **Storage:** unit tests mock the S3 client. Integration tests use an S3-compatible server (**RustFS** since Phase 1: MinIO no longer publishes images, phase 1 DV1-4). **Nightly contract tests against a real R2 staging bucket** cover R2-specific behaviour.
 5. **Multi-device end-to-end tests:** Playwright browser contexts act as separate devices on simulated networks.
 6. **Evidence-based verification:** a phase is `VERIFIED` only with recorded evidence for every acceptance criterion (§9).
 
@@ -25,8 +25,8 @@
 |---|---|---|---|
 | Unit | Vitest | IP normalization, network key derivation, the visibility rule, HMAC and timing-safe helpers, ID/secret/code generation and normalization, filename sanitization, `Content-Disposition` encoding, entitlement resolution, expiry validation, zod schemas, error mapping | Every PR |
 | Component | Vitest + Testing Library (jsdom) | Uploader state machine, text conflict handling, network status states and audience line, burn confirmation UI | Every PR |
-| Database | pgTAP (`supabase test db`) | Constraints, grants (client roles denied on `app`), `realtime.messages` policies, `can_access_topic` (`net`, `user`, later `room`), SQL functions (`reserve_storage`, `end_share`, `claim_burn_share`, `rate_limit_hit`, `observe_network`, `refresh_network_status`), triggers | Every PR |
-| API integration | Vitest + local Supabase + MinIO | Route handlers with a real DB: authentication, IDOR matrix, CSRF/Origin, rate limits, upload init → PUT → complete, download issuance, link unlock, codes | Every PR |
+| Database | pgTAP (`supabase test db`) | Constraints, grants (client roles denied on `app`), `realtime.messages` policies, `can_access_topic` (`net`, `user`, and `room` since Phase 4), SQL functions (`reserve_storage`, `end_share`, `claim_burn_share`, `rate_limit_hit`, `observe_network`, `refresh_network_status`), triggers | Every PR |
+| API integration | Vitest + local Supabase + RustFS (not MinIO, phase 1 DV1-4); since Phase 4 also Mailpit and a fake billing provider (§4.14) | Route handlers with a real DB: authentication, IDOR matrix, CSRF/Origin, rate limits, upload init → PUT → complete, download issuance, link unlock, codes | Every PR |
 | Concurrency | Vitest with parallel requests or connections | Burn claim exactly once, quota boundary, concurrent `observe` upserts, seat limits, idempotency keys | Every PR (fast), nightly (heavy) |
 | Realtime integration | Vitest + local Supabase Realtime | Channel join allowed/denied, presence permissions, trigger emission after commit only | Every PR |
 | End-to-end | Playwright (Chromium, WebKit, Firefox) | Multi-device user flows | PR smoke, nightly full |
@@ -60,6 +60,14 @@ The ASN override follows the same rule as the IP override: honoured only in test
 **Documentation ranges (found in Phase 0):** the fixtures use RFC 5737 / RFC 3849 documentation addresses (`203.0.113.0/24`, `198.51.100.0/24`, `2001:db8::/32`), which the production rules reject as non-global. `normalizeClientIp` accepts them only with `allowDocumentationRanges`, which `resolveClientIp` sets **only for the test override**. Addresses arriving through Cloudflare never get this exemption (covered by a unit test).
 
 **As implemented in Phase 0:** the override is honoured only when `ALLOW_TEST_CLIENT_IP=1`, `NODE_ENV` is not `production`, and `APP_ENV` is `local` or `test`. `proxy.ts` strips `X-Test-Client-IP` from every request otherwise.
+
+**As implemented in Phase 1:**
+
+- Test servers are the production build started with `NODE_ENV=test` (`next start` keeps it), so the override works there while deployments (`NODE_ENV=production`) refuse it (F1-8).
+- Tests use a **random IPv6 /64 per test** (`2001:db8:xxxx:yyyy::/64`) instead of fixed fixtures, so repeated runs never accumulate presence and trip `too_large`. Relay and blocked networks are made by inserting an egress range or setting a space's status for that random network.
+- `TEST_CLIENT_IP_DEFAULT` (local development only) gives requests without the header one simulated network, so two local browsers share it.
+- The `mobileAsn` and `cgnatV4` fixtures don't apply until SP-04 (no ASN list, no dual-stack binding).
+- In Playwright, each browser context is a device and adds `X-Test-Client-IP` only to same-origin `/api/v1/` requests (route interception), so storage and Supabase calls are unchanged.
 
 ---
 
@@ -171,6 +179,131 @@ IDs are stable. Phase documents reference them.
 | T-053 | Anonymous → permanent keeps shares ("My uploads") and private-room memberships. Merge requires a valid anonymous token and cannot take over another user's anonymous data. | Integration | 4 |
 | T-054 | Cross-workspace isolation, admin vs member actions, seat-limit race, retention policy, branding assets PNG/JPEG only | Integration + concurrency | 5 |
 
+**As built (Phase 4, 2026-10-18):** T-050 … T-053 are implemented and automated **locally**, T-052 against a fake billing provider only. [§4.14](#414-phase-4-test-map-as-built-2026-10-18) maps them to suites and lists what still needs staging (the provider sandbox and one real transaction, AC-4.3). T-054 stays Phase 5: no workspace code exists.
+
+### 4.11 Phase 1 test map (as built, 2026-10-15)
+
+| Tests | Where |
+|---|---|
+| T-005 (real loader with fixture lists, merged ranges, exact-address matching, refusal to empty a list) | `tests/integration/egress-loader.test.ts`, `tests/unit/egress-loader.test.ts` |
+| No client address reaches Postgres, even with full statement logging (phase 1 F1-13) | `tests/integration/ip-logging.test.ts`, `tests/unit/egress-list.test.ts`, pgTAP (no `inet` arguments, prefix limits) |
+| Upload URLs after a share ends: tombstones, 412 on re-PUT, URL expiry recorded and capped, completion deadline (phase 1 F1-12, F1-15) | `tests/integration/uploads.test.ts`, pgTAP (`claim_object_deletions`) |
+| T-009 fallback without SP-04: IPv4 and IPv6 networks never merge | `tests/integration/local-sharing.test.ts` |
+| R2 lifecycle and CORS files match the code (AC-1.8 config part) | `tests/unit/r2-config.test.ts` |
+| Emulated phones (WebKit iPhone, Chromium Pixel): layout and upload flow, **not real-device evidence** | `tests/e2e/local-mobile.spec.ts` |
+| Phone-width layout at 320–430 px (header labels on one line, dialog title clear of the close button, no sideways scroll) and one-row header at 768/1280 px | `tests/e2e/local-layout.spec.ts` |
+| Audience line only under the composer; status bar "This network · N devices here now" | `tests/component/local-ui.test.tsx`, `tests/e2e/local-sharing.spec.ts` |
+| Stale egress lists fail closed, write-once uploads and stored-header check (security review M1, M2) | `tests/unit/egress-list.test.ts`, `tests/integration/uploads.test.ts`, `supabase/tests/phase1_local_sharing.test.sql` |
+| T-001, T-002, T-003, T-004, T-005 (lists), T-007, T-011, T-013, T-014, T-041 | `tests/integration/local-sharing.test.ts`; T-001/T-002/T-003/T-011 also `tests/e2e/local-sharing.spec.ts` |
+| T-006, T-023, T-024 (unit), T-025 (unit) | `tests/unit/network-key.test.ts`, `filenames.test.ts`, `storage-keys.test.ts`, `sniff.test.ts` |
+| T-008 | `tests/e2e/origin-lock.spec.ts` (Phase 0) and `tests/unit/network-client-ip.test.ts` |
+| T-010, T-046, T-047, T-049 | `tests/integration/api-hygiene.test.ts` |
+| T-015, T-016, T-017, T-018 (delivery) | `tests/integration/realtime.test.ts` |
+| T-018 (payload allow-list), T-022, T-042, guards, quota ledger, topic authorization | `supabase/tests/phase1_local_sharing.test.sql` |
+| T-019, T-020, T-021, T-024, T-025, T-026, T-027, T-028 (preview), 100 MB single PUT | `tests/integration/uploads.test.ts` |
+| IDOR matrix (§5) | `tests/integration/authz-matrix.test.ts` (fails if a route or method has no entry) |
+| T-048 | `tests/e2e/smoke.spec.ts` and zero-violation checks in `tests/e2e/local-sharing.spec.ts` |
+| Cache removal on network change (T-003, RISK-027), API client, uploader store, status copy, share card | `tests/unit/client-*.test.ts`, `tests/component/local-ui.test.tsx` |
+| T-009 | Not applicable until SP-04 adopts the dual-stack probe |
+
+### 4.12 Phase 2 test map (as built, 2026-10-15)
+
+| Tests | Where |
+|---|---|
+| T-011 (links: creator only, 403 for others on the network, 404 elsewhere) | `tests/integration/remote-links.test.ts`, `authz-matrix.test.ts` |
+| T-012 (link-only never in a feed or `net:` topic) | `remote-links.test.ts`, `realtime.test.ts`, `supabase/tests/phase2_remote_sharing.test.sql`, `tests/e2e/local-remote-sharing.spec.ts` |
+| T-029 (viewer sees only the target; this share vs another share) | `remote-links.test.ts`, the IDOR matrix (`linkViewer`, `otherLinkViewer`), E2E |
+| T-030 (identical 404 for wrong secret, unknown and malformed link; comparable timing; 410 only after proof) | `remote-links.test.ts` |
+| T-031 (revoked, expired, ended share, expired grant) | `remote-links.test.ts`, E2E |
+| T-032 (codes: normalization, expiry, replacement, limits, Turnstile escalation, 24-hour block, secret never returned) | `tests/unit/short-code.test.ts`, `link-secrets.test.ts`, `tests/integration/short-codes.test.ts`, `tests/component/remote-ui.test.tsx`, E2E |
+| T-033 (unfurlers) | `tests/integration/remote-hygiene.test.ts`, E2E |
+| T-035 (executables refused for links; archives with a warning) | `tests/unit/file-policy.test.ts`, `sniff.test.ts`, `remote-links.test.ts`, E2E (archive warning) |
+| T-036 (report → takedown → access gone, objects queued, audit) | `tests/integration/abuse.test.ts`, pgTAP, E2E |
+| T-047 (share and code pages: `no-store`, `noindex`, `no-referrer`) | `remote-hygiene.test.ts`, `tests/unit/security-headers.test.ts`, E2E |
+| T-049 (link-related 429s: unlock, daily URL cap, code block, reports) | `remote-links.test.ts`, `short-codes.test.ts`, `abuse.test.ts` |
+| Secrets and codes never in database statements or server logs | `remote-hygiene.test.ts` (full statement logging, server log file) |
+| Session fixation, cookie attributes | `remote-links.test.ts`, `tests/unit/link-cookies.test.ts` |
+| QR content | `tests/component/share-qr.test.tsx` (decodes the rendered SVG), E2E (decodes the creator's QR and opens it) |
+| Kill switches `remote_links_enabled`, `short_codes_enabled` | `remote-links.test.ts`, `short-codes.test.ts` |
+| Report copy promises no review, since no alert reaches a person (owner decision 2026-10-16) | `tests/component/remote-ui.test.tsx` (report dialog and report page) |
+| Real phone cameras and keyboards, takedown rehearsal, real Turnstile and R2 | Manual: [phase 2 procedure](phases/phase-2-manual-verification.md) (not run) |
+
+### 4.13 Phase 3 test map (as built, 2026-10-16)
+
+New IDs T3-01 … T3-12 are from [phase 3 §17.15](phases/phase-3-expiry-one-time-download.md#1715-test-plan). Results: [phase 3 §18.8](phases/phase-3-expiry-one-time-download.md#188-tests).
+
+| Tests | Where |
+|---|---|
+| T-037 (50 claims → one winner): SQL level with 50 connections, ×20; API level with 50 devices; mixed devices and viewers; a mutation check at both levels; isolation refused | `tests/integration/burn-concurrency.test.ts` |
+| T-038 (claimant retries ≤ 3 per file, others 410, after grace 410, finalize), T3-01 (10 parallel retries → 3 URLs) | `tests/integration/burn.test.ts`, `burn-concurrency.test.ts`, `supabase/tests/phase3_burn.test.sql`, E2E `local-burn.spec.ts` |
+| T-039 (creator never claims; downloads until consumed, D-7) | `burn.test.ts`, pgTAP, E2E |
+| T-040 (text Reveal is the claim) | `burn.test.ts`, pgTAP, `tests/component/burn-ui.test.tsx`, E2E |
+| T-028 burn part (no previews for burn shares) | `burn.test.ts` |
+| T-043 (guard rails: active and claimed shares, key format; backoff; dry run) | `tests/integration/janitor.test.ts`, `supabase/tests/phase3_janitor.test.sql`, `tests/unit/janitor-core.test.ts` |
+| T-044, T3-08, T3-09 (orphans queued, young and live kept, unknown keys counted, missing objects marked, cursor across invocations) | `janitor.test.ts`, pgTAP |
+| T-045 (anonymous-user cleanup with cascades; suspended users kept, D-9) | `supabase/tests/phase3_retention.test.sql`, `tests/integration/retention.test.ts` |
+| T3-02, T3-03, T3-06 (R2 errors, dropped connections, tombstone failure, five failures → health 503) | `janitor.test.ts` (`tests/integration/support/fault-proxy.ts`) |
+| T3-04, T3-05 (a crashed run's locks; the janitor switched off: access denied, bytes wait) | `janitor.test.ts` |
+| T3-07 (pg_cron stopped: access denied; health 503) | `tests/integration/cron-health.test.ts` |
+| T3-10, T3-11 (a claimed share's lifecycle; deletion after the 5-minute margin; end to end through cron and the function) | `burn.test.ts`, `uploads.test.ts` |
+| T3-12 and AC-3.8 (unfurlers and a page left open never claim) | `burn.test.ts`, E2E |
+| Purge with evidence exclusions (D-3), legal hold and release (D-2) | pgTAP, `retention.test.ts`, `janitor.test.ts` |
+| Legal-hold copies out of the lifecycle rules' reach (RISK-031): the copy, a missing source, the original deleted as R2 would, release deleting both; no lifecycle rule on `hold/` | `janitor.test.ts`, pgTAP, `tests/unit/{janitor-core,s3-fetch,r2-config}.test.ts` |
+| The janitor never uses the injected Supabase secrets (RISK-036): a static scan of `supabase/functions`; the real function with `app_janitor` blocked | `tests/unit/functions-env.test.ts`, `janitor.test.ts` |
+| Storage-usage reconciliation and its race | pgTAP, `retention.test.ts` |
+| Egress loader under `app_egress_loader` (D-4) | `tests/integration/egress-loader.test.ts`, pgTAP |
+| `/health/cron`, `/me/entitlements` | `cron-health.test.ts`, `burn.test.ts`, the IDOR matrix |
+| The deletion tests of Phase 1 after D-1 (the janitor runs, every assertion kept) | `tests/integration/uploads.test.ts` |
+| Real phones, staging soak, chaos with alerts, restore drill | Manual: [phase 3 procedure](phases/phase-3-manual-verification.md) (not run) |
+
+### 4.14 Phase 4 test map (as built, 2026-10-18)
+
+New IDs (T-052.n, T-053.n and T4-A, T4-E, T4-EN, T4-B, T4-M, T4-X, T4-P, T4-R, T4-H) are from [phase 4 §17.19](phases/phase-4-pro-accounts.md#1719-test-plan), the plan. What each task built and ran is in its own tests subsection, [phase 4 §18.6](phases/phase-4-pro-accounts.md#186-tests) … [§31.7](phases/phase-4-pro-accounts.md#317-tests); suite sizes per task are in [ARCHITECTURE §16](ARCHITECTURE.md#16-testing-architecture). **All of this is local evidence:** Phase 4 is uncommitted, CI has not run it (§7), and nothing in it is VERIFIED.
+
+| Tests | Where |
+|---|---|
+| **Accounts** ([§18.6](phases/phase-4-pro-accounts.md#186-tests)): T4-A1, T4-A1b (sign-up and a second sign-in by email code), T4-A1c (by code; since P4-23 an E2E journey also opens the emailed link through the callback's **Continue**), T4-A1d (Google, stubbed only), T4-A11 (the cache cleared on a user change), password sessions refused (F4-2) | `tests/integration/accounts.test.ts`, `tests/unit/accounts.test.ts`, `tests/component/{account-ui,runtime-auth}.test.tsx`, `supabase/tests/phase4_accounts.test.sql`, `tests/e2e/local-accounts.spec.ts` |
+| **Merge** ([§18.6](phases/phase-4-pro-accounts.md#186-tests)): T-053.1 (the upgrade keeps the user ID), T-053.2 … T-053.19 (the threat rows M1 … M16: fault injection at 12 tables, the coverage list, concurrency; T-053.10 with 10 parallel redemptions, not 20: DV4-12) | `tests/integration/{merge,merge-concurrency}.test.ts`, `phase4_accounts.test.sql`, `local-accounts.spec.ts` |
+| **Devices** ([§18.6](phases/phase-4-pro-accounts.md#186-tests)): T4-A7 (the cap of 10 with concurrent registrations, a revoked device's `DEVICE_REVOKED`, a suspended user's `403`), T4-A8/9 (list and revoke), T4-A10 (`net:` isolation per device, C4-2), E26 | `tests/integration/devices.test.ts`, the account cases in `realtime.test.ts`, `phase4_accounts.test.sql` |
+| **Entitlements** ([§19.7](phases/phase-4-pro-accounts.md#197-tests)): T-050 as the rows of the [enforcement matrix as built](phases/phase-4-pro-accounts.md#193-the-enforcement-matrix-as-built), each with positive, negative and boundary cases (rows built later are tested in their own task's suite, below); T4-EN1 … EN5 (resolution at each status boundary, overrides, snapshot v2, `/me/entitlements`, spoofing); T-051 (the [downgrade rows](phases/phase-4-pro-accounts.md#194-snapshot-and-downgrade-rules-as-built-1716), plus each later feature's own) | `tests/integration/entitlements.test.ts`, `tests/unit/entitlements.test.ts`, `supabase/tests/phase4_entitlements.test.sql`, `tests/component/billing-ui.test.tsx` (hints, pricing page), `tests/e2e/local-entitlements.spec.ts`; `proOther` in the IDOR matrix |
+| **Billing**, against the fake provider only ([§20.7](phases/phase-4-pro-accounts.md#207-tests)): T-052.1 … 15 (the threat rows B1 … B16 except B15, a runbook item; B17 is a staging item), T4-B1 (checkout), T4-B2 (portal), T4-B3 (the lifecycle), T4-B4 (reconciliation), T4-B5 (redirect spoofing), E31 | `tests/integration/billing.test.ts`, `supabase/tests/phase4_billing.test.sql`, `tests/unit/billing-{env,fake-adapter,boundaries}.test.ts`, `tests/component/billing-settings.test.tsx`, `tests/e2e/local-billing.spec.ts` |
+| **Multipart** ([§21.7](phases/phase-4-pro-accounts.md#217-tests)): T4-M0 … M13 except M6 (no `Content-MD5`, so it doesn't apply), E25; the browser journey (interrupted, reloaded, the file picked again, the object checked byte for byte) at 120 MiB in every run and once at 5 GiB (`E2E_MULTIPART_LONG=1`) | `tests/integration/multipart.test.ts`, `supabase/tests/phase4_multipart.test.sql`, `tests/unit/{multipart,client-multipart,janitor-core}.test.ts`, `tests/component/upload-resume.test.tsx`, `tests/e2e/local-multipart.spec.ts` |
+| **Expiry 30/90 days and extend** ([§22.7](phases/phase-4-pro-accounts.md#227-tests)): T4-X1 … X6 (in place, and by copy through the real janitor Edge Function, with faults through the proxy), E5, E6 | `tests/integration/extend.test.ts`, `supabase/tests/phase4_extend.test.sql`, `tests/unit/{janitor-core,s3-fetch}.test.ts`, `tests/component/extend-ui.test.tsx`, `tests/e2e/local-extend.spec.ts` |
+| **Link passwords** ([§23.6](phases/phase-4-pro-accounts.md#236-tests)): T4-P1 … P7 and P9 (locks, Turnstile after a lock, codes, change and removal, a change racing a verification, no password in logs), T4-P8 (the scrypt format and the attempt order, DV4-70), E11, E12 | `tests/integration/passwords.test.ts`, `tests/unit/password.test.ts`, `supabase/tests/phase4_link_passwords.test.sql`, `tests/component/password-ui.test.tsx`, `tests/e2e/local-passwords.spec.ts` |
+| **Private rooms and invite links** ([§24.8](phases/phase-4-pro-accounts.md#248-tests)): T4-R1 … R4, R7 … R11, R13, R14, T-034 (invite links), E17 … E19, E21, E23, E29, E30, the downgrade, the `room:` topic | `tests/integration/rooms.test.ts`, `supabase/tests/phase4_rooms.test.sql`, `tests/unit/{room-labels,visibility,visibility-burn}.test.ts`, `tests/component/room-ui.test.tsx`, `tests/e2e/local-rooms.spec.ts`; T4-R7's cells also in the IDOR matrix |
+| **QR pairing** ([§25.6](phases/phase-4-pro-accounts.md#256-tests)): T-034 for pairing codes (one use, 10 minutes), T4-R3, R8, R9 for pairing codes, E20, T4-R15's render-and-decode half | `tests/integration/pairing.test.ts`, `supabase/tests/phase4_pairing.test.sql`, `tests/unit/invite-schemas.test.ts`, `tests/component/pairing-ui.test.tsx`, `tests/e2e/local-pairing.spec.ts`; the IDOR matrix's pairing pass |
+| **Read-only room links** ([§26.6](phases/phase-4-pro-accounts.md#266-tests)): T4-R5, R6, R12, E15, E16, E22 | `tests/integration/room-links.test.ts`, `supabase/tests/phase4_room_links.test.sql`, `tests/unit/room-link-schemas.test.ts`, `tests/component/room-link-ui.test.tsx`, `tests/e2e/local-room-links.spec.ts` |
+| **Transfer history** ([§27.6](phases/phase-4-pro-accounts.md#276-tests)): T4-H1, T4-H2 (own shares only; no identities, IPs, network keys or secrets in any field), T4-H3 (in integration, not pgTAP as planned: DV4-127; the purge itself is Phase 3's pgTAP), E24 | `tests/integration/history.test.ts`, `tests/component/history-ui.test.tsx`, `tests/e2e/local-history.spec.ts` (no migration, so no pgTAP file) |
+| **Merge and deletion coverage** ([§28.7](phases/phase-4-pro-accounts.md#287-tests)): T-053.3, .12, .13 with rooms, history and links; T4-A5's execution (what the deletion job removes and keeps); the merge racing room activity | `supabase/tests/phase4_account_coverage.test.sql`, `tests/integration/account-coverage.test.ts`, `tests/unit/http-handler.test.ts` |
+| **Account deletion** ([§29.7](phases/phase-4-pro-accounts.md#297-tests)): T4-A5 (the request: a recent sign-in, or `aal2` with an authenticator; the grace; the job), T4-A6 (cancel restores writes), E30, races with sign-in, a merge and room activity | `tests/integration/account-deletion.test.ts`, `supabase/tests/phase4_account_deletion.test.sql`, `tests/component/{account-deletion-ui,runtime-auth}.test.tsx`, `tests/unit/accounts.test.ts`, `tests/e2e/local-account-deletion.spec.ts` |
+| **Email, local part** ([§30.7](phases/phase-4-pro-accounts.md#307-tests); no catalogue ID): every Auth email is ours, codes in the body only, links only through the callback, the password reset carries nothing; delivery to Mailpit, a mail scanner, replay, expiry, unknown addresses | `tests/unit/email-templates.test.ts`, `tests/integration/email.test.ts`, `tests/component/account-ui.test.tsx`, `local-accounts.spec.ts` |
+| **MFA** ([§31.7](phases/phase-4-pro-accounts.md#317-tests)): T4-A12 with real TOTP codes (enrolment ends the other sessions; a new sign-in gets no device or Realtime until `aal2`; removal needs `aal2`; nothing the client sends counts); 4A's `aal2` rule for revocation (D4-30) | `tests/integration/mfa.test.ts`, `supabase/tests/phase4_mfa.test.sql`, `tests/component/{mfa-ui,runtime-auth}.test.tsx`, `tests/e2e/local-mfa.spec.ts`; 4A's rule in `tests/integration/devices.test.ts` |
+| IDOR matrix (§5): the Phase 4 actors, and a row for every new route and method | `tests/integration/authz-matrix.test.ts` |
+| **Not automated** (staging, real devices, the owner): T4-B6 (provider sandbox) and T4-B7 (one real transaction), blocked on Q-005 and P4-13; real email delivery and the [`infra/email`](../infra/email/README.md) §7 checks; real Google sign-in; hosted Supabase (TOTP settings, rate limits, the `auth.users` delete); R2 (5 GiB multipart with an interrupted network, `CopyObject`, lifecycle rules, the janitor's abort); T4-R15's real-phone scan and a room across Wi-Fi and mobile data; desktop Safari, Firefox and Edge (Phase 4's E2E journeys ran in desktop Chromium only, phone widths by viewport); the AC-4.7 deletion rehearsal | Manual and staging: the Phase 4 procedure is P4-26's (§8), not written yet |
+
+**Mutation checks.** Phase 4 kept Phase 3's practice ([phase 4 §17.19.8](phases/phase-4-pro-accounts.md#17198-idor-matrix-and-regression)): each task deliberately broke its own code, one change at a time (server code rebuilt and run against `next start`, database objects changed live, UI code against its component tests), ran the tests that should notice, then restored the file or object and checked it by checksum or catalogue fingerprint. The tables are in [§18.5](phases/phase-4-pro-accounts.md#185-security-findings-and-how-they-were-tested), [§19.6](phases/phase-4-pro-accounts.md#196-security-findings-and-how-they-were-tested) and [§20.6](phases/phase-4-pro-accounts.md#206-findings-while-building-and-how-they-were-handled) for 4A–4C, and in each 4D task's tests subsection (§21.7 … §31.7). Rows per task: 4A 8, 4B 14, 4C 15, P4-14 17, P4-15 20, P4-16 28, P4-17 39, P4-18 28, P4-19 32, P4-20 9, P4-21 10, P4-22 16, P4-23 10, P4-24 13. All were caught except one equivalent change (P4-14's MM-6, replaced by MM-6b) and two that survive by design because a second check guards the same rule (P4-17's MU-7a, a redundant signal; P4-19's ML-1, caught as ML-1c when both checks go). Where a mutation first survived (MX-5, MR-5a, ML-3b) or was caught for the wrong reason (MT-5), a test was added or fixed and the mutation then failed. Mutation IDs repeat across tasks (MD-1, MP-1 …): read them per section.
+
+**Test tooling added in Phase 4.** Mailpit, started by `pnpm stack:start`, receives Auth's emails; `mailCode` and `latestMail` in `tests/integration/support/accounts.ts`, and `mailCode`, `mailLink` and `signInThroughUi` in `tests/e2e/support/accounts.ts`, read them as a person reads an inbox. `tests/support/totp.ts` computes RFC 6238 codes from the key Auth gives at enrolment (integration and E2E). `tests/support/fake-billing.ts` is the fake provider (signed webhooks, a control API that moves subscriptions), driven by `tests/integration/support/billing.ts`. Area helpers: `tests/integration/support/{entitlements,multipart,rooms}.ts` and `tests/e2e/support/rooms.ts`.
+
+**Earlier suites.** Every Phase 1–3 test still runs. Phase 4 changed earlier assertions only on purpose, each recorded as a deviation with its intent kept (D4-28; for example DV4-2, DV4-18, DV4-19, DV4-20, DV4-22, DV4-35, DV4-43).
+
+**Latest full run:** P4-26's final run, 2026-10-18, the Phase 4 completion gate, after one database reset for P4-26's migration ([§33.5](phases/phase-4-pro-accounts.md#335-the-final-run)).
+
+| Step | Result |
+|---|---|
+| Typecheck, lint, `next build` | Passed |
+| Unit + component | 69 files, **647 of 647** |
+| `db reset` | All 19 migrations; the regenerated types unchanged; the edge janitor `202` after restarting the edge runtime |
+| pgTAP | 18 files, **1,078** passed |
+| API integration | 33 files, **522 of 522** (520 s) |
+| E2E (75 tests) | **72 passed in the full run; the 3 failures passed when rerun alone** (`--last-failed`, 3 of 3). All three were timing under load: the merge journey's 30-second limit (its trace shows the changed device route was never reached), an archive not in the feed within 5 s, and T-002's 2-second live post. This is the first complete E2E run since P4-23's, and it closes P4-24's pending rerun. |
+
+**Known flaky tests and environment failures.** Each is recorded where it happened, and each passed on a rerun or alone; the E2E run the full C: drive stopped was completed in P4-26. Rerun before calling one a regression.
+- **A test defect, not fixed:** `passwords.test.ts` (T4-P6) and Phase 2's `remote-hygiene.test.ts:94` make a "wrong" secret by replacing its last character with `A`, which gives the real secret about one run in 16 ([§30.7](phases/phase-4-pro-accounts.md#307-tests)).
+- **Timing under load, not fixed:** P4-26's final run: `local-accounts.spec.ts:33` (the merge, then sign-out) at its 30 s limit, `local-remote-sharing.spec.ts:52` (an archive in the feed within 5 s) and T-002 (`local-sharing.spec.ts:11`, a live post within 2 s) ([§33.5](phases/phase-4-pro-accounts.md#335-the-final-run)); the shared E2E sign-in helper's 5-second wait for *Send code*, and T4-M1 counting 7 of 8 parts ([§26.6](phases/phase-4-pro-accounts.md#266-tests)); P4-17's room Realtime test missing `member.changed` within 3 s, and Phase 3's reconcile race on a database grown without a reset ([§27.6](phases/phase-4-pro-accounts.md#276-tests)); 4A's `account-ui.test.tsx` timing out at 5 s ([§28.7](phases/phase-4-pro-accounts.md#287-tests)); two 4C billing tests that need the host and database clocks to agree, and the janitor's legal-hold test ([§22.7](phases/phase-4-pro-accounts.md#227-tests)); Phase 3's burn confirmation on an emulated WebKit phone ([§19.7](phases/phase-4-pro-accounts.md#197-tests)).
+- **Fixed in the test:** the multipart Cancel test's wait (5 s → 60 s, [§21.7](phases/phase-4-pro-accounts.md#217-tests)); P4-16's race test limit (120 s → 300 s, [§23.6](phases/phase-4-pro-accounts.md#236-tests)); P4-20's T4-H1 racing the expiry job ([§27.6](phases/phase-4-pro-accounts.md#276-tests)); the `account.changed` test now proves its channel is live first, and Phase 1's emulated-Pixel preview check waits for the image (DV4-43) ([§20.6](phases/phase-4-pro-accounts.md#206-findings-while-building-and-how-they-were-handled) #5, #8).
+- **The environment, not the code:** other projects' test suites on the same machine ([§22.7](phases/phase-4-pro-accounts.md#227-tests)); a stalled run during a host clock correction, its full cause not established ([§21.7](phases/phase-4-pro-accounts.md#217-tests)); the local edge runtime stopped ([§20.6](phases/phase-4-pro-accounts.md#206-findings-while-building-and-how-they-were-handled) #7); Docker Desktop stopping ([§27.6](phases/phase-4-pro-accounts.md#276-tests)); the computer sleeping ([§28.7](phases/phase-4-pro-accounts.md#287-tests)); the full C: drive ([§31.7](phases/phase-4-pro-accounts.md#317-tests)).
+
 ---
 
 ## 5. IDOR matrix as code
@@ -186,6 +319,13 @@ IDs are stable. Phase documents reference them.
   - (Phase 4) private-room member, owner, removed member, non-member
   - (Phase 5) member and admin of another workspace
 - A test enumerates `app/api/v1/**/route.ts` and **fails if a route or method has no matrix entry**. New endpoints cannot ship without authorization tests.
+- **As built (Phase 2, 2026-10-15):** `tests/integration/authz-matrix.test.ts` covers all 24 handlers with nine actors: anonymous, same network, other network, left the network, blocked network (standing for every non-`ok` status), viewer of this share's link, viewer of another share's link, creator on the share's network, creator's second device elsewhere. Viewer actors send only the link-session cookie.
+- **As built (Phase 4, 2026-10-18):** the same file covers 66 handlers (every method of the 57 `route.ts` files) with 15 actors.
+  - **Changed:** the creator is now an account, and the creator's second device is a real second sign-in of it. Phase 1–3 reused the creator's token, which the device-session binding now refuses ([phase 4 DV4-2](phases/phase-4-pro-accounts.md#184-deviations-from-the-plan)).
+  - **New actors:** `proOther` (4B: a Pro account on another network; a plan raises limits, never access, so it gets exactly what a Free stranger gets); `roomOwner` (a Pro account), `roomMember` (an anonymous browser that joined by an invite link) and `removedMember` (P4-17); `roomLinkViewer` and `otherRoomLinkViewer` (P4-19: grants for a read-only link to this room or to another room, no Supabase session).
+  - **Non-members** are every other actor: a room is someone else's, so `404`, as for a room that doesn't exist.
+  - **Extra passes:** the invites row runs again with a pairing body (P4-18); the deletion rows run with the creator's deletion scheduled (P4-22).
+  - Two actors of the plan ([phase 4 §17.19.8](phases/phase-4-pro-accounts.md#17198-idor-matrix-and-regression)) are not separate: the non-member accounts are the network actors and `proOther`; a deletion-pending account is only the deletion rows' setup, and `account-deletion.test.ts` covers its read-only grace. Workspace actors stay Phase 5.
 - The matrix mirrors [03 §9](03-security-and-network-design.md#9-authorization-matrix). Changing one requires changing the other.
 
 ---
@@ -213,9 +353,17 @@ IDs are stable. Phase documents reference them.
 
 Coverage is a signal, not a goal. **Requirement:** 100% of authorization matrix entries and 100% of the enforcement rows in [07 §3](07-plans-and-entitlements.md#3-enforcement-points) have tests.
 
+**As built (2026-10-18):** `.github/workflows/ci.yml` runs on pull requests and on pushes to `main`: a checks job (typecheck, lint, unit and component tests with coverage, `pnpm audit --audit-level high`) and a stack job (pgTAP, generated-type drift, build, integration, E2E in Chromium and WebKit). It was last changed in Phase 1. There are no nightly, staging or release workflows yet (no staging; SP-01, DEC-022). **CI has not run Phase 4:** the Phase 4 work is uncommitted and nothing has been pushed, so every Phase 4 result in §4.14 comes from local runs, and Phase 4's "Automated" level ("green locally and in CI", [phase 4 §17.20](phases/phase-4-pro-accounts.md#1720-acceptance-gates)) is met locally only. Whether the workflow passes Phase 4's suites unchanged is unknown until it runs. P4-26's audit found what to settle first ([phase 4 §33.3](phases/phase-4-pro-accounts.md#333-the-audit-findings), finding 5):
+- when `playwright.config.ts` can't read the stack's status, it drops every `local-*` project, Phase 4's specs among them, with only a warning, so the E2E step would pass without them;
+- nothing checks the edge runtime, which has exited at `db reset` locally;
+- the step labels are Phase 1's;
+- the job's 30-minute limit hasn't been measured against Phase 4's suites.
+
 ---
 
 ## 8. Manual device and network matrix (Phases 1–3 verification)
+
+Phase 1's executable procedure, with steps, expected results and the recording sheet, is [phases/phase-1-manual-verification.md](phases/phase-1-manual-verification.md); Phase 2's (scenarios 6 and 7: QR scans and codes on phones, plus the takedown rehearsal) is [phases/phase-2-manual-verification.md](phases/phase-2-manual-verification.md); Phase 3's is [phases/phase-3-manual-verification.md](phases/phase-3-manual-verification.md). **Phase 4's is [phases/phase-4-manual-verification.md](phases/phase-4-manual-verification.md)** (P4-26): hosted Supabase and sign-in, email, MFA, entitlements, the billing sandbox and one real transaction, R2, real devices, the deletion rehearsal and operations, each with an evidence slot. **None of its steps has been run** (no staging, no provider, no real-device session). Real-device tests need staging behind Cloudflare: a phone on the developer's Wi-Fi presents a private address and local sharing is `unavailable`.
 
 | Devices / browsers | Networks |
 |---|---|
@@ -241,3 +389,5 @@ Scenarios to record (pass/fail, notes, screenshots):
 3. **Documentation:** phase status, decisions, risks, roadmap and changelogs updated.
 4. **Owner sign-off:** recorded in the phase document's verification record with date and name.
 5. Status changes from `COMPLETED` to `VERIFIED`. If anything fails, the phase goes back to `IN PROGRESS`, or `BLOCKED` with the reason recorded.
+
+**Phase 4 (2026-10-18):** every task is IMPLEMENTED / NEEDS REVIEW; none is VERIFIED. Its evidence so far is the local test records (§4.14), with no CI run or commit SHA (the work is uncommitted), no manual results and no owner sign-off. P4-26 ran every suite once on a reset database, wrote the manual procedure with evidence slots, and fixed the device routes ([phase 4 §33](phases/phase-4-pro-accounts.md#33-phase-4-final-task-p4-26-final-verification-2026-10-18)). P4-13 (the provider's adapter) waits for Q-005.

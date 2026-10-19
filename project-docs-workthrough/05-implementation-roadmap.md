@@ -3,8 +3,8 @@
 | Field | Value |
 |---|---|
 | Document status | PROPOSED — awaiting owner review |
-| Last updated | 2026-09-29 (shadcn/ui installed, database baseline executed locally). Earlier: 2026-09-23 (CR-001) |
-| Implementation authorized | **Phase 0 only** (owner, 2026-09-23). Phase 1 is not authorized. |
+| Last updated | 2026-10-15 (Phase 2 authorized and implemented; §2 status, §6 Phase 2 as built, §7 `qr`). Earlier: 2026-09-29 (shadcn/ui installed, database baseline executed locally); 2026-09-23 (CR-001) |
+| Implementation authorized | Phase 0 (owner, 2026-09-23). **Phase 1** (owner, 2026-10-15, before Phase 0 is VERIFIED; phase 1 §17.1). **Phase 2** (owner, 2026-10-15, before Phase 1 is VERIFIED; phase 2 §17.1). Phase 3 is not authorized. |
 
 ---
 
@@ -35,8 +35,8 @@ Status vocabulary: `NOT STARTED` · `PLANNED` · `IN PROGRESS` · `BLOCKED` · `
 | Phase | Goal | Key deliverables | Depends on | Relative size | Status |
 |---|---|---|---|---|---|
 | [0 — Foundation](phases/phase-0-foundation.md) | De-risk the platform and establish tooling, infrastructure and security skeleton | Repo hygiene, CI, test harnesses, Supabase/R2/Cloudflare environments, `proxy.ts` headers and origin lock, baseline schema, shadcn/ui, **spikes SP-01…SP-04**, accepted decisions | Owner review of this plan | M | **BLOCKED on owner items** (all in-repo work done and verified locally, 2026-09-29; see phase 0 §18) |
-| [1 — Anonymous local sharing](phases/phase-1-local-sharing.md) | Devices on the same network automatically see each other's text and files (≤ 100 MB) in realtime, with no join step. Other networks see nothing. | Anonymous devices, network keys, presence, fail-closed guards, local feed, "My uploads", text items, direct-to-R2 upload, downloads, realtime, **frontend state layers** (Zustand, TanStack Query, Realtime bridge; DEC-034), request-time expiry + basic jobs, quotas and rate limits | Phase 0 VERIFIED, Q-029/Q-030 answered | L | PLANNED (detailed scope) |
-| [2 — Remote secure sharing](phases/phase-2-remote-sharing.md) | Explicit, secure sharing across networks | Share links (fragment secret, creator only), link grants, share page, QR, short codes, link-only posting, abuse reporting and takedown, executable policy | Phase 1 VERIFIED, Q-010/Q-027/Q-028 answered | L | PLANNED (detailed scope) |
+| [1 — Anonymous local sharing](phases/phase-1-local-sharing.md) | Devices on the same network automatically see each other's text and files (≤ 100 MB) in realtime, with no join step. Other networks see nothing. | Anonymous devices, network keys, presence, fail-closed guards, local feed, "My uploads", text items, direct-to-R2 upload, downloads, realtime, **frontend state layers** (Zustand, TanStack Query, Realtime bridge; DEC-034), request-time expiry + basic jobs, quotas and rate limits | Phase 0 VERIFIED, Q-029/Q-030 answered | L | **NEEDS REVIEW** (implemented and tested on the local stack 2026-10-15; staging, manual matrix and owner review open; see phase 1 §18) |
+| [2 — Remote secure sharing](phases/phase-2-remote-sharing.md) | Explicit, secure sharing across networks | Share links (fragment secret, creator only), link grants, share page, QR, short codes, link-only posting, abuse reporting and takedown, executable policy | Phase 1 VERIFIED, Q-010/Q-027/Q-028 answered | L | **CODE COMPLETE / NEEDS REVIEW** (implemented and tested on the local stack 2026-10-15, not committed; real-device QR, takedown rehearsal, staging and owner review open; see phase 2 §18) |
 | [3 — Expiry, cleanup, one-time download](phases/phase-3-expiry-one-time-download.md) | Reliable storage lifecycle and burn-after-download | Deletion outbox + storage janitor, full job catalogue, reconciliation, tombstones, anonymous user cleanup, burn claim/grace, **public beta launch gate** | Phase 2 VERIFIED | L | PLANNED (detailed scope) |
 | [4 — Accounts, entitlements, Pro, billing](phases/phase-4-pro-accounts.md) | Paid Pro plan with server-enforced limits | Accounts and anonymous upgrade/merge, entitlements engine, billing (merchant of record), multipart 5 GB uploads, 30/90-day expiry, passwords, private rooms (with members, invites and QR pairing), room links, history, device management | Phase 3 VERIFIED, Q-005/006/007/014/015 answered | XL | PLANNED (outline) |
 | [5 — Team workspaces](phases/phase-5-team.md) | Paid Team plan | Workspaces, members, invitations, roles, pooled quota, retention policies, admin controls, audit and history, branded share pages, seat billing | Phase 4 VERIFIED, Q-017/018 answered | L | PLANNED (outline) |
@@ -145,9 +145,11 @@ Paths follow the target layout in [02 §7](02-system-architecture.md#7-applicati
 
 ### Phase 1
 
+**As built (2026-10-15):** the module layout in [02 §7](02-system-architecture.md#7-application-module-layout-target) lists the files that exist. Differences from the plan below: no `network/probe.ts` or probe route (DV1-3); no `network/{classify,presence}.ts` (classification and presence are in `network/observe.ts` and `app.observe_network`); no `local/feed.ts` (the feed query is in `shares/read.ts`); storage in `storage/{s3.ts, keys.ts, sniff.ts}` (no `r2.ts`, `presign.ts` or `verify.ts`); no `security/turnstile.ts` (Supabase Auth verifies the token); one `lib/shared/api/schemas.ts` for all zod contracts; `proxy.ts` gained no session refresh (DV1-6); no `quota/` folder (reservations are SQL functions called from `shares/create.ts` and `shares/complete.ts`); `lib/client/{turnstile.ts, runtime.tsx, use-network.ts, linkify.ts}`, `lib/client/queries/{keys.ts, shares.ts}`, `lib/client/stores/{session.ts, presence.ts, uploads.ts, ui-store.ts}`, `components/local/*`, `scripts/local-stack.cjs`, `supabase/seed.sql`, `tests/integration/**`, `tests/e2e/local-sharing.spec.ts`.
+
 | Action | Path |
 |---|---|
-| Modify | `app/page.tsx` ("This network" home), `app/layout.tsx` (Supabase and Turnstile providers), `proxy.ts` (Supabase session refresh) |
+| Modify | `app/page.tsx` ("This network" home), `app/layout.tsx` (Supabase and Turnstile providers), `proxy.ts` (Supabase session refresh; **not done**, see the note above) |
 | Create | `app/(app)/uploads/page.tsx` (My uploads) |
 | Create | `app/api/v1/devices/route.ts`, `app/api/v1/devices/[deviceId]/route.ts`, `app/api/v1/network/observe/route.ts`, `app/api/v1/network/probe/route.ts` (only if the dual-stack probe is adopted) |
 | Create | `app/api/v1/local/shares/route.ts`, `app/api/v1/me/shares/route.ts`, `app/api/v1/shares/route.ts`, `app/api/v1/texts/route.ts` |
@@ -157,11 +159,13 @@ Paths follow the target layout in [02 §7](02-system-architecture.md#7-applicati
 | Create | `lib/client/providers.tsx` (QueryClientProvider + Zustand store providers), `lib/client/queries/{network.ts,local.ts,shares.ts,me.ts}` (TanStack Query key and `queryOptions` contracts), `lib/client/stores/{uploads.ts,ui.ts,presence.ts}` (Zustand) |
 | Create | `lib/shared/api/{devices,network,local,shares,files}.ts` (zod schemas), `lib/shared/constants.ts` |
 | Create | `lib/server/db/{client.ts,types.gen.ts}`, `lib/server/auth/session.ts`, `lib/server/policy/*.ts`, `lib/server/entitlements/{plans.ts,resolve.ts}` (Free only), `lib/server/quota/*.ts`, `lib/server/ratelimit/*.ts` |
-| Create | `lib/server/network/{key.ts,classify.ts,presence.ts,probe.ts}`, `lib/server/local/{feed.ts,visibility.ts}`, `lib/server/shares/{create.ts,complete.ts,text.ts,download.ts,end.ts}` |
+| Create | `lib/server/network/{key.ts,classify.ts,presence.ts,probe.ts}`, `lib/server/local/{feed.ts,visibility.ts}` (as built: no `classify.ts`, `presence.ts`, `probe.ts` or `feed.ts`, see the note above), `lib/server/shares/{create.ts,complete.ts,text.ts,download.ts,end.ts}` |
 | Create | `lib/server/storage/{r2.ts,keys.ts,presign.ts,verify.ts,sniff.ts}`, `lib/server/security/{filenames.ts,content-disposition.ts,turnstile.ts}`, `lib/server/audit/log.ts` |
 | Create | `supabase/migrations/<ts>_phase1_*.sql`, `supabase/tests/phase1_*.test.sql`, `tests/integration/**`, `tests/e2e/local-*.spec.ts` |
 
 ### Phase 2
+
+**As built (2026-10-15):** as planned below, except: no `lib/server/abuse/takedown.ts` (takedown is the SQL functions only, DV2-7); `lib/server/links/` also has `secrets.ts`, `cookies.ts` and `viewer.ts`; `lib/server/security/turnstile.ts` and `lib/server/network/requester.ts` are new; `lib/shared/short-code.ts`; `components/legal/` and `components/ui/input.tsx`; route-group layouts `app/(app)/layout.tsx` and `app/(share)/layout.tsx`, with `app/page.tsx` moved to `app/(app)/page.tsx` (DV2-12); `app/api/v1/links/[linkId]/code/route.ts` (DV2-5); `project-docs-workthrough/runbooks/kill-switches.md` and `phases/phase-2-manual-verification.md`.
 
 | Action | Path |
 |---|---|
@@ -222,14 +226,13 @@ Paths follow the target layout in [02 §7](02-system-architecture.md#7-applicati
 | 0 ✅ | `@tanstack/react-query` 5.103, `zustand` 5.0 | Server state and client-only state (DEC-034). **Moved from Phase 1 at the owner's request (DV-1).** Providers only in Phase 0. |
 | 0 ✅ | `@types/node` 20 → 22 (dev) | Matches the Node 22 runtime; required by Vitest 5 |
 | 0 ✅ | shadcn/ui (2026-09-29, DEC-035): `radix-ui` 1.6, `class-variance-authority` 0.7, `cn` 0.4, `lucide-react` 1.48, `tw-animate-css` 1.4; `shadcn` 4.21 (dev: CLI plus its build-time CSS) | UI component system. Current shadcn installs `cn` instead of `clsx` + `tailwind-merge`, and the unified `radix-ui` package instead of per-primitive `@radix-ui/*` packages. `shadcn` was moved from `dependencies` to `devDependencies`. |
-| 1 | `@supabase/supabase-js`, `@supabase/ssr` | Auth sessions, Realtime |
-| 1 | `@tanstack/react-query-devtools` (dev only, kept out of production bundles) | Query debugging |
-| 1 | `@aws-sdk/client-s3`, `@aws-sdk/s3-request-presigner` | R2 presign, head, delete |
-| 1 | `file-type` | Magic-byte sniffing |
-| 1 | `pino` | Structured logs with redaction |
-| 1 | Turnstile integration (small wrapper or `@marsidev/react-turnstile`) | CAPTCHA |
-| 1 | A permissively licensed user-agent parser (for example `bowser`), or a tiny internal parser | Device platform labels. **Avoid AGPL-licensed parsers.** |
-| 2 | `qrcode` (or equivalent MIT library) | Client-side QR |
+| 1 ✅ | `@supabase/supabase-js` 2.117 | Anonymous Auth sessions (browser) and token verification (server), Realtime |
+| 1 ✅ | `@aws-sdk/client-s3` 3.1151, `@aws-sdk/s3-request-presigner` 3.1151 | R2 presign (signed headers and `Content-Length`), HEAD, ranged GET, delete |
+| 1 ✅ | `get-nonce` 1.0.1 (already in the tree via Radix) | Hands the CSP nonce to Radix's runtime `<style>` tag (phase 1 F1-5) |
+| 1 ✅ | `next` / `eslint-config-next` 16.3.5 → 16.3.8; overrides for `source-map-js`, `sharp`, `@modelcontextprotocol/sdk` | Security advisories (phase 1 F1-6) |
+| 1 ✗ | `@supabase/ssr` | Not used: bearer-token API auth (DV1-14) |
+| 1 ✗ | `file-type`, `pino`, Turnstile wrapper, UA parser, `@tanstack/react-query-devtools` | Not added: small internal modules instead (DV1-7) |
+| 2 ✅ | `qr` 0.7.2 (paulmillr; MIT or Apache-2.0; no dependencies), instead of `qrcode` (DV2-8) | Client-side QR; its decoder verifies QR content in tests |
 | 3 | Deno `npm:` imports in the Edge Function: `aws4fetch` or `@aws-sdk/client-s3`, `postgres` | Janitor |
 | 4 | `@node-rs/argon2` | Link passwords |
 | 4 | Billing provider SDK (per Q-005), `idb-keyval` | Billing, multipart resume state |
@@ -251,3 +254,4 @@ Paths follow the target layout in [02 §7](02-system-architecture.md#7-applicati
 | 2026-09-23 | Owner decisions: Next.js confirmed (DEC-001). Frontend state management accepted (DEC-034): Zustand for client-only state, TanStack Query for server state, Supabase Realtime for live signals only. Phase 1 deliverables, file lists (Phases 1, 2, 4), dependencies and a cross-phase "Frontend state" workstream added. |
 | 2026-09-23 | Phase 0 implementation: dependency table marks installed Phase 0 packages with versions (TanStack Query and Zustand moved to Phase 0, DV-1; shadcn/ui waits for approval, DV-2); Phase 0 file list updated to what was created. |
 | 2026-09-29 | Owner approved the Phase 0 review and shadcn/ui (DEC-035). shadcn/ui packages installed and the Phase 0 file list updated. Database baseline executed locally. Phase 0 remains blocked on owner-side items (phase 0 §18.3). |
+| 2026-10-15 | Owner instruction: Phase 2 implemented before Phase 1 is VERIFIED (phase 2 §17.1), on branch `phase-2-remote-sharing`. Status CODE COMPLETE / NEEDS REVIEW. Phase 2 file list annotated as built; `qr` added instead of `qrcode`. |

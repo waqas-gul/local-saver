@@ -95,4 +95,25 @@ describe("resolveClientIp (T-008 unit part)", () => {
       reason: "non_global",
     });
   });
+
+  it("falls back to TEST_CLIENT_IP_DEFAULT only when the override is allowed and the header is absent", () => {
+    const devEnv = parseEnv({ APP_ENV: "local", ALLOW_TEST_CLIENT_IP: "1", TEST_CLIENT_IP_DEFAULT: "203.0.113.10" });
+    expect(resolveClientIp(headers({}), devEnv)).toMatchObject({
+      status: "ok",
+      source: "test-override",
+      ip: { networkPrefix: "203.0.113.10" },
+    });
+    expect(resolveClientIp(headers({ "x-test-client-ip": "198.51.100.20" }), devEnv)).toMatchObject({
+      ip: { networkPrefix: "198.51.100.20" },
+    });
+    const withoutOverride = parseEnv({ TEST_CLIENT_IP_DEFAULT: "203.0.113.10" });
+    expect(resolveClientIp(headers({}), withoutOverride)).toEqual({ status: "unavailable", reason: "no_trusted_proxy" });
+  });
+
+  it("groups IPv6 by the configured prefix length", () => {
+    const env56 = parseEnv({ NODE_ENV: "test", APP_ENV: "test", ALLOW_TEST_CLIENT_IP: "1", NETWORK_IPV6_PREFIX_LEN: "56" });
+    expect(resolveClientIp(headers({ "x-test-client-ip": "2001:db8:a:1ff::10" }), env56)).toMatchObject({
+      ip: { networkPrefix: "2001:db8:a:100::/56" },
+    });
+  });
 });

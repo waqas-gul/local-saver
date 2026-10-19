@@ -5,8 +5,8 @@ import { useStore } from "zustand";
 import { createStore, type StoreApi } from "zustand/vanilla";
 
 /**
- * Zustand holds client-only state (DEC-034). This store is the Phase 0 skeleton:
- * generic UI state only. Upload queue and presence stores arrive with their features.
+ * Zustand holds client-only state (DEC-034): open dialogs, the composer's text draft and the
+ * files selected before upload. Nothing here comes from the server.
  *
  * Stores are created per provider, never at module level, so server renders
  * can't share state between requests (rule 6).
@@ -14,15 +14,23 @@ import { createStore, type StoreApi } from "zustand/vanilla";
 
 export type UiState = {
   activeDialog: string | null;
+  textDraft: string;
+  selectedFiles: File[];
   openDialog: (id: string) => void;
   closeDialog: () => void;
+  setTextDraft: (text: string) => void;
+  setSelectedFiles: (files: File[]) => void;
 };
 
 export function createUiStore(initial: Partial<Pick<UiState, "activeDialog">> = {}): StoreApi<UiState> {
   return createStore<UiState>()((set) => ({
     activeDialog: initial.activeDialog ?? null,
+    textDraft: "",
+    selectedFiles: [],
     openDialog: (id) => set({ activeDialog: id }),
     closeDialog: () => set({ activeDialog: null }),
+    setTextDraft: (textDraft) => set({ textDraft }),
+    setSelectedFiles: (selectedFiles) => set({ selectedFiles }),
   }));
 }
 

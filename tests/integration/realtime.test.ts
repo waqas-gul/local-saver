@@ -1,0 +1,224 @@
+import { randomUUID } from "node:crypto";
+import type { RealtimeChannel } from "@supabase/supabase-js";
+import { afterAll, afterEach, describe, expect, it } from "vitest";
+import { createAccount, signInByCode } from "./support/accounts";
+import { adminDb, closeAdminDb, Device, newNetwork } from "./support/api";
+
+/** Realtime authorization and delivery on the local Supabase stack (T-015 … T-018, DEC-011). */
+
+type Joined = { status: string; channel: RealtimeChannel; messages: Record<string, unknown>[] };
+const devices: Device[] = [];
+
+async function device(ip: string | null) {
+  const d = await Device.create(ip);
+  devices.push(d);
+  return d;
+}
+
+async function join(d: Device, topic: string, options: { private?: boolean } = {}): Promise<Joined> {
+  const messages: Record<string, unknown>[] = [];
+  const channel = d.supabase.channel(topic, {
+    config: { private: options.private ?? true, presence: { key: d.deviceId } },
+  });
+  channel.on("broadcast", { event: "*" }, (message) => messages.push(message.payload as Record<string, unknown>));
+  // Presence is only delivered to channels that listen for it before subscribing.
+  channel.on("presence", { event: "sync" }, () => {});
+  const status = await new Promise<string>((resolve) => {
+    const timer = setTimeout(() => resolve("TIMED_OUT"), 10_000);
+    channel.subscribe((state) => {
+      if (state !== "SUBSCRIBED" && state !== "CHANNEL_ERROR" && state !== "TIMED_OUT" && state !== "CLOSED") return;
+      clearTimeout(timer);
+      resolve(state);
+    });
+  });
+  return { status, channel, messages };
+}
+
+async function waitFor(predicate: () => boolean, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return true;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return predicate();
+}
+
+afterEach(async () => {
+  await Promise.all(devices.splice(0).map((d) => d.supabase.removeAllChannels()));
+});
+afterAll(closeAdminDb);
+
+describe("topic authorization", () => {
+  it("user:{id} is joinable only by that user (T-016)", async () => {
+    const a = await device(newNetwork().ip());
+    const b = await device(newNetwork().ip());
+    expect((await join(a, `user:${a.userId}`)).status).toBe("SUBSCRIBED");
+    expect((await join(b, `user:${a.userId}`)).status).toBe("CHANNEL_ERROR");
+  });
+
+  it("net:{space} needs fresh presence on an ok space (T-015)", async () => {
+    const home = newNetwork();
+    const a = await device(home.ip());
+    const [spaceId] = (await a.observe()).spaceIds;
+    expect((await join(a, `net:${spaceId}`)).status).toBe("SUBSCRIBED");
+
+    const stranger = await device(newNetwork().ip());
+    expect((await join(stranger, `net:${spaceId}`)).status).toBe("CHANNEL_ERROR");
+
+    const leaver = await device(home.ip());
+    await leaver.moveTo(newNetwork().ip());
+    expect((await join(leaver, `net:${spaceId}`)).status).toBe("CHANNEL_ERROR");
+  });
+});
+
+describe("accounts: topics follow the device of each session (Phase 4, C4-2)", () => {
+  async function accountDevice(email: string, ip: string | null) {
+    const d = await Device.attach(await signInByCode(email), ip);
+    devices.push(d);
+    return d;
+  }
+
+  it("a second browser of the same account can't join the network the first one is on (T4-A10)", async () => {
+    const { email } = await createAccount();
+    const home = newNetwork();
+    const away = newNetwork();
+    const first = await accountDevice(email, home.ip());
+    const second = await accountDevice(email, away.ip());
+    const [homeSpace] = (await first.observe()).spaceIds;
+    const [awaySpace] = (await second.observe()).spaceIds;
+    expect((await join(first, `net:${homeSpace}`)).status).toBe("SUBSCRIBED");
+    expect((await join(second, `net:${homeSpace}`)).status).toBe("CHANNEL_ERROR");
+    expect((await join(second, `net:${awaySpace}`)).status).toBe("SUBSCRIBED");
+    // The account-wide topic is open to every device of the account.
+    expect((await join(second, `user:${first.userId}`)).status).toBe("SUBSCRIBED");
+  });
+
+  it("presence on the network shows only the devices actually there", async () => {
+    const { email } = await createAccount();
+    const home = newNetwork();
+    const here = await accountDevice(email, home.ip());
+    const elsewhere = await accountDevice(email, newNetwork().ip());
+    const neighbour = await device(home.ip());
+    const [spaceId] = (await neighbour.observe()).spaceIds;
+    const listener = await join(neighbour, `net:${spaceId}`);
+    const present = await join(here, `net:${spaceId}`);
+    expect([listener.status, present.status]).toEqual(["SUBSCRIBED", "SUBSCRIBED"]);
+    await present.channel.track({ deviceId: here.deviceId, label: here.label });
+    expect(await waitFor(() => Object.keys(listener.channel.presenceState()).includes(here.deviceId), 3_000)).toBe(true);
+    // The other browser of the account is refused before it could track anything.
+    expect((await join(elsewhere, `net:${spaceId}`)).status).toBe("CHANNEL_ERROR");
+    expect(Object.keys(listener.channel.presenceState())).not.toContain(elsewhere.deviceId);
+  });
+
+  it("a revoked device's still-valid token can't (re)join its user topic or its network", async () => {
+    const { email } = await createAccount();
+    const home = newNetwork();
+    const revoked = await accountDevice(email, home.ip());
+    const keeper = await accountDevice(email, newNetwork().ip());
+    const [spaceId] = (await revoked.observe()).spaceIds;
+    expect((await join(revoked, `user:${revoked.userId}`)).status).toBe("SUBSCRIBED");
+    await revoked.supabase.removeAllChannels();
+    expect((await keeper.call("DELETE", `/api/v1/me/devices/${revoked.deviceId}`)).status).toBe(204);
+    expect((await join(revoked, `user:${revoked.userId}`)).status).toBe("CHANNEL_ERROR");
+    expect((await join(revoked, `net:${spaceId}`)).status).toBe("CHANNEL_ERROR");
+    expect((await join(keeper, `user:${keeper.userId}`)).status).toBe("SUBSCRIBED");
+  });
+});
+
+describe("delivery", () => {
+  it("a link-only share is never signalled on the network, only to its creator (T-012, Phase 2)", async () => {
+    const net = newNetwork();
+    const a = await device(net.ip());
+    const b = await device(net.ip());
+    const [spaceId] = (await b.observe()).spaceIds;
+    const network = await join(b, `net:${spaceId}`);
+    const creator = await join(a, `user:${a.userId}`);
+    expect([network.status, creator.status]).toEqual(["SUBSCRIBED", "SUBSCRIBED"]);
+
+    const linkOnly = await a.postText("only by link", undefined, "link_only");
+    const local = await a.postText("on the network");
+    // The local post arriving proves the channel works; the link-only one must never come.
+    expect(await waitFor(() => network.messages.some((m) => m.shareId === local.id), 3_000)).toBe(true);
+    expect(await waitFor(() => creator.messages.some((m) => m.shareId === linkOnly.id), 3_000)).toBe(true);
+    expect(network.messages.some((m) => m.shareId === linkOnly.id)).toBe(false);
+  });
+
+  it("a new local share reaches other devices on the network within 2 s, as IDs only (AC-1.1, T-018)", async () => {
+    const net = newNetwork();
+    const a = await device(net.ip());
+    const b = await device(net.ip());
+    const [spaceId] = (await b.observe()).spaceIds;
+    const listener = await join(b, `net:${spaceId}`);
+    expect(listener.status).toBe("SUBSCRIBED");
+
+    const started = Date.now();
+    const share = await a.postText("realtime hello");
+    const received = await waitFor(() => listener.messages.some((m) => m.shareId === share.id), 2_000);
+    expect(received, `no signal within 2 s (waited ${Date.now() - started} ms)`).toBe(true);
+
+    const message = listener.messages.find((m) => m.shareId === share.id) as Record<string, unknown>;
+    expect(message).toMatchObject({ v: 1, type: "share.changed", shareId: share.id, status: "active" });
+    expect(Object.keys(message).every((k) => ["v", "type", "shareId", "status", "version", "id"].includes(k))).toBe(true);
+    expect(JSON.stringify(listener.messages)).not.toContain("realtime hello");
+  });
+
+  it("the creator's user topic carries their own shares (My uploads)", async () => {
+    const a = await device(newNetwork().ip());
+    const mine = await join(a, `user:${a.userId}`);
+    const share = await a.postText();
+    expect(await waitFor(() => mine.messages.some((m) => m.shareId === share.id), 2_000)).toBe(true);
+  });
+
+  it("clients cannot broadcast, but present devices can track presence (T-015)", async () => {
+    const net = newNetwork();
+    const a = await device(net.ip());
+    const b = await device(net.ip());
+    const [spaceId] = (await b.observe()).spaceIds;
+    const sender = await join(a, `net:${spaceId}`);
+    const listener = await join(b, `net:${spaceId}`);
+    expect([sender.status, listener.status]).toEqual(["SUBSCRIBED", "SUBSCRIBED"]);
+
+    await sender.channel.send({ type: "broadcast", event: "share.changed", payload: { shareId: "forged" } });
+    expect(await waitFor(() => listener.messages.some((m) => m.shareId === "forged"), 1_500)).toBe(false);
+
+    expect(await sender.channel.track({ deviceId: a.deviceId, label: a.label })).toBe("ok");
+    const seen = await waitFor(() => Object.keys(listener.channel.presenceState()).includes(a.deviceId), 3_000);
+    expect(seen).toBe(true);
+  });
+
+  it("a public channel with the same topic receives none of the private signals", async () => {
+    const net = newNetwork();
+    const a = await device(net.ip());
+    const [spaceId] = (await a.observe()).spaceIds;
+    const outsider = await device(newNetwork().ip());
+    const sneaky = await join(outsider, `net:${spaceId}`, { private: false });
+    const share = await a.postText();
+    expect(await waitFor(() => sneaky.messages.some((m) => m.shareId === share.id), 1_500)).toBe(false);
+  });
+
+  it("a rolled-back transaction emits nothing (T-017)", async () => {
+    const net = newNetwork();
+    const a = await device(net.ip());
+    const [spaceId] = (await a.observe()).spaceIds;
+    const listener = await join(a, `net:${spaceId}`);
+    const shareId = randomUUID();
+
+    const client = await adminDb().connect();
+    try {
+      await client.query("begin");
+      await client.query(
+        `insert into app.shares (id, scope, network_space_id, kind, created_by_user_id, billing_subject_type,
+                                 billing_subject_id, status, retention_class, expires_at, entitlement_snapshot)
+         values ($1, 'network', $2, 'text', $3, 'user', $3, 'active', 'd7', now() + interval '1 hour', '{}')`,
+        [shareId, spaceId, a.userId],
+      );
+      await client.query("rollback");
+    } finally {
+      client.release();
+    }
+
+    const stored = await adminDb().query("select count(*)::int as n from realtime.messages where payload ->> 'shareId' = $1", [shareId]);
+    expect(stored.rows[0].n).toBe(0);
+    expect(await waitFor(() => listener.messages.some((m) => m.shareId === shareId), 1_500)).toBe(false);
+  });
+});

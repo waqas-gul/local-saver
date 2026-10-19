@@ -25,11 +25,315 @@ export type JsonValue = JsonArray | JsonObject | JsonPrimitive;
 
 export type Timestamp = ColumnType<Date, Date | string, Date | string>;
 
+export interface AppAbuseReports {
+  action_taken: string | null;
+  category: string;
+  created_at: Generated<Timestamp>;
+  details: string | null;
+  id: Generated<string>;
+  link_id: string | null;
+  network_space_id: string | null;
+  reporter_email: string | null;
+  reporter_kind: string;
+  reporter_user_id: string | null;
+  resolved_at: Timestamp | null;
+  resolved_by: string | null;
+  share_id: string | null;
+  status: Generated<string>;
+}
+
+export interface AppAuditEvents {
+  action: string;
+  actor_device_id: string | null;
+  actor_kind: string;
+  actor_user_id: string | null;
+  id: Generated<Int8>;
+  metadata: Generated<Json>;
+  network_space_id: string | null;
+  occurred_at: Generated<Timestamp>;
+  retention_until: Generated<Timestamp>;
+  target_id: string | null;
+  target_type: string | null;
+}
+
+export interface AppBillingCheckouts {
+  billing_interval: string;
+  created_at: Generated<Timestamp>;
+  expires_at: Generated<Timestamp>;
+  id: Generated<string>;
+  plan: string;
+  provider: string;
+  provider_checkout_id: string | null;
+  status: Generated<string>;
+  subject_id: string;
+  subject_type: string;
+}
+
+export interface AppBillingCustomers {
+  created_at: Generated<Timestamp>;
+  provider: string;
+  provider_customer_id: string;
+  subject_id: string;
+  subject_type: string;
+}
+
+export interface AppBillingDisputes {
+  lost_at: Generated<Timestamp>;
+  provider: string;
+  provider_dispute_id: string;
+  provider_subscription_id: string | null;
+  subject_id: string;
+  subject_type: string;
+}
+
+export interface AppBillingEvents {
+  attempts: Generated<number>;
+  error: string | null;
+  event_type: string;
+  id: Generated<Int8>;
+  locked_until: Timestamp | null;
+  occurred_at: Timestamp | null;
+  payload: Generated<Json>;
+  processed_at: Timestamp | null;
+  provider: string;
+  provider_event_id: string;
+  received_at: Generated<Timestamp>;
+  retention_until: Generated<Timestamp>;
+  status: Generated<string>;
+  subject_id: string | null;
+  subject_type: string | null;
+}
+
+export interface AppDevices {
+  auth_session_id: string | null;
+  created_at: Generated<Timestamp>;
+  id: Generated<string>;
+  label: string;
+  last_seen_at: Generated<Timestamp>;
+  platform: Generated<string>;
+  revoked_at: Timestamp | null;
+  revoked_by_device_id: string | null;
+  revoked_reason: string | null;
+  user_id: string;
+}
+
+export interface AppDownloads {
+  actor_kind: string;
+  created_at: Generated<Timestamp>;
+  device_id: string | null;
+  event: string;
+  file_id: string | null;
+  id: Generated<Int8>;
+  link_id: string | null;
+  network_space_id: string | null;
+  retention_until: Timestamp;
+  room_id: string | null;
+  share_id: string;
+  url_expires_at: Timestamp | null;
+  user_agent_family: string | null;
+  user_id: string | null;
+}
+
+export interface AppEntitlementOverrides {
+  created_at: Generated<Timestamp>;
+  created_by: string;
+  expires_at: Timestamp | null;
+  id: Generated<string>;
+  key: string;
+  reason: string;
+  revoked_at: Timestamp | null;
+  subject_id: string;
+  subject_type: string;
+  value: Json;
+}
+
+export interface AppFiles {
+  created_at: Generated<Timestamp>;
+  declared_mime: string;
+  declared_size_bytes: Int8;
+  detected_mime: string | null;
+  extension: Generated<string>;
+  id: Generated<string>;
+  multipart_upload_id: string | null;
+  network_space_id: string | null;
+  object_deleted_at: Timestamp | null;
+  object_key: string;
+  object_missing_at: Timestamp | null;
+  original_name: string;
+  part_count: number | null;
+  part_size_bytes: Int8 | null;
+  position: Generated<number>;
+  preview_kind: Generated<string>;
+  rejection_reason: string | null;
+  risk_flags: Generated<string[]>;
+  scan_status: Generated<string>;
+  share_id: string;
+  size_bytes: Int8 | null;
+  stored_content_type: string;
+  upload_expires_at: Timestamp;
+  upload_mode: Generated<string>;
+  upload_status: Generated<string>;
+  upload_url_expires_at: Timestamp | null;
+  verified_at: Timestamp | null;
+}
+
+export interface AppIdempotencyKeys {
+  created_at: Generated<Timestamp>;
+  endpoint: string;
+  expires_at: Generated<Timestamp>;
+  key_hash: Buffer;
+  response: Json;
+  user_id: string;
+}
+
+export interface AppJobHeartbeats {
+  job: string;
+  last_error: string | null;
+  last_failed_at: Timestamp | null;
+  last_result: Generated<Json>;
+  last_started_at: Timestamp | null;
+  last_succeeded_at: Timestamp | null;
+  updated_at: Generated<Timestamp>;
+}
+
+export interface AppLinkGrants {
+  expires_at: Timestamp;
+  granted_at: Generated<Timestamp>;
+  granted_via: string;
+  link_id: string;
+  password_verified_at: Timestamp | null;
+  password_version: Generated<number>;
+  session_id_hash: Buffer;
+}
+
+export interface AppLinkSessions {
+  created_at: Generated<Timestamp>;
+  expires_at: Timestamp;
+  id_hash: Buffer;
+  last_seen_at: Generated<Timestamp>;
+}
+
+export interface AppMergeIntents {
+  anon_device_id: string;
+  anon_user_id: string;
+  completed_at: Timestamp | null;
+  created_at: Generated<Timestamp>;
+  expires_at: Timestamp;
+  id: string;
+  pepper_version: number;
+  result: Json | null;
+  secret_hmac: Buffer;
+  status: Generated<string>;
+  target_user_id: string | null;
+}
+
+export interface AppNetworkEgressRanges {
+  cidr: string;
+  id: Generated<Int8>;
+  source: string;
+  updated_at: Generated<Timestamp>;
+}
+
+export interface AppNetworkPresence {
+  device_id: string;
+  first_seen_at: Generated<Timestamp>;
+  last_seen_at: Generated<Timestamp>;
+  present_until: Timestamp;
+  space_id: string;
+  user_id: string;
+}
+
+export interface AppNetworkSpaces {
+  created_at: Generated<Timestamp>;
+  devices_24h: Generated<number>;
+  family: number;
+  id: Generated<string>;
+  key_version: number;
+  last_seen_at: Generated<Timestamp>;
+  last_share_at: Timestamp | null;
+  network_key: Buffer;
+  status: Generated<string>;
+  status_reason: string | null;
+  status_until: Timestamp | null;
+}
+
+export interface AppObjectDeletions {
+  attempts: Generated<number>;
+  completed_at: Timestamp | null;
+  hold_copy: string | null;
+  hold_reason: string | null;
+  id: Generated<Int8>;
+  last_attempt_at: Timestamp | null;
+  last_error: string | null;
+  legal_hold: Generated<boolean>;
+  locked_until: Timestamp | null;
+  multipart_upload_id: string | null;
+  not_before: Generated<Timestamp>;
+  object_key: string;
+  reason: string;
+  requested_at: Generated<Timestamp>;
+  source_file_id: string | null;
+  tombstoned_at: Timestamp | null;
+}
+
+export interface AppProfiles {
+  created_at: Generated<Timestamp>;
+  deletion_requested_at: Timestamp | null;
+  deletion_scheduled_for: Timestamp | null;
+  display_name: string | null;
+  updated_at: Generated<Timestamp>;
+  user_id: string;
+}
+
 export interface AppRateCounters {
   expires_at: Timestamp;
   key: string;
   value: Generated<Int8>;
   window_start: Timestamp;
+}
+
+export interface AppRoomInvites {
+  created_at: Generated<Timestamp>;
+  created_by_user_id: string | null;
+  expires_at: Timestamp;
+  id: string;
+  kind: string;
+  max_uses: number | null;
+  pepper_version: number;
+  revoked_at: Timestamp | null;
+  room_id: string;
+  secret_hmac: Buffer;
+  use_count: Generated<number>;
+}
+
+export interface AppRoomMembers {
+  created_at: Generated<Timestamp>;
+  id: Generated<string>;
+  invite_id: string | null;
+  joined_at: Generated<Timestamp>;
+  joined_device_id: string | null;
+  joined_via: string;
+  last_active_at: Generated<Timestamp>;
+  removed_at: Timestamp | null;
+  removed_by_user_id: string | null;
+  removed_reason: string | null;
+  role: string;
+  room_id: string;
+  user_id: string;
+}
+
+export interface AppRooms {
+  created_at: Generated<Timestamp>;
+  default_expiry_seconds: number | null;
+  deleted_at: Timestamp | null;
+  entitlement_snapshot: Json;
+  id: Generated<string>;
+  kind: Generated<string>;
+  label: string;
+  label_is_custom: Generated<boolean>;
+  last_activity_at: Generated<Timestamp>;
+  members_can_create_links: Generated<boolean>;
+  owner_user_id: string | null;
 }
 
 export interface AppRuntimeFlags {
@@ -41,7 +345,201 @@ export interface AppRuntimeFlags {
   value: Generated<Json>;
 }
 
+export interface AppShareExtensionFiles {
+  attempts: Generated<number>;
+  created_at: Generated<Timestamp>;
+  file_id: string;
+  finished_at: Timestamp | null;
+  id: Generated<Int8>;
+  last_attempt_at: Timestamp | null;
+  last_error: string | null;
+  locked_until: Timestamp | null;
+  new_expires_at: Timestamp;
+  new_key: string;
+  new_retention_class: string;
+  not_before: Generated<Timestamp>;
+  old_key: string;
+  share_id: string;
+  status: Generated<string>;
+}
+
+export interface AppShareLinks {
+  allow_download: Generated<boolean>;
+  created_at: Generated<Timestamp>;
+  created_by_device_id: string | null;
+  created_by_user_id: string | null;
+  entitlement_snapshot: Json;
+  expires_at: Timestamp;
+  follows_share_expiry: Generated<boolean>;
+  id: string;
+  last_unlocked_at: Timestamp | null;
+  password_hash: string | null;
+  password_locked_until: Timestamp | null;
+  password_set_at: Timestamp | null;
+  password_version: Generated<number>;
+  pepper_version: number;
+  revoke_reason: string | null;
+  revoked_at: Timestamp | null;
+  revoked_by_user_id: string | null;
+  room_id: string | null;
+  secret_hmac: Buffer;
+  share_id: string | null;
+  short_code_expires_at: Timestamp | null;
+  short_code_hmac: Buffer | null;
+  short_code_pepper_version: number | null;
+  target_type: Generated<string>;
+  unlock_count: Generated<number>;
+}
+
+export interface AppShares {
+  billing_subject_id: string;
+  billing_subject_type: string;
+  burn_after_download: Generated<boolean>;
+  claim_grace_until: Timestamp | null;
+  claimed_at: Timestamp | null;
+  claimed_by_user_id: string | null;
+  claimed_device_id: string | null;
+  claimed_link_id: string | null;
+  claimed_link_session_hash: Buffer | null;
+  created_at: Generated<Timestamp>;
+  created_by_device_id: string | null;
+  created_by_user_id: string | null;
+  end_reason: string | null;
+  ended_at: Timestamp | null;
+  entitlement_snapshot: Json;
+  expires_at: Timestamp | null;
+  extension_failed_at: Timestamp | null;
+  extension_pending: Generated<boolean>;
+  file_count: Generated<number>;
+  id: Generated<string>;
+  kind: string;
+  metadata_purge_after: Timestamp | null;
+  network_space_id: string | null;
+  retention_class: string;
+  room_id: string | null;
+  scope: string;
+  status: string;
+  title: string | null;
+  total_bytes: Generated<Int8>;
+  updated_at: Generated<Timestamp>;
+}
+
+export interface AppStorageReconcileRuns {
+  counts: Generated<Json>;
+  finished_at: Timestamp | null;
+  id: Generated<Int8>;
+  last_key: string | null;
+  locked_until: Timestamp | null;
+  started_at: Generated<Timestamp>;
+  status: Generated<string>;
+}
+
+export interface AppStorageReservations {
+  bytes: Int8;
+  created_at: Generated<Timestamp>;
+  expires_at: Timestamp;
+  file_id: string | null;
+  id: Generated<string>;
+  settled_at: Timestamp | null;
+  status: Generated<string>;
+  subject_id: string;
+  subject_type: string;
+}
+
+export interface AppStorageUsage {
+  bytes_committed: Generated<Int8>;
+  bytes_reserved: Generated<Int8>;
+  files_committed: Generated<number>;
+  subject_id: string;
+  subject_type: string;
+  updated_at: Generated<Timestamp>;
+}
+
+export interface AppSubscriptions {
+  billing_interval: string;
+  cancel_at_period_end: Generated<boolean>;
+  canceled_at: Timestamp | null;
+  created_at: Generated<Timestamp>;
+  current_period_end: Timestamp | null;
+  current_period_start: Timestamp | null;
+  grace_until: Timestamp | null;
+  id: Generated<string>;
+  plan: string;
+  provider: string;
+  provider_customer_id: string;
+  provider_subscription_id: string;
+  provider_updated_at: Timestamp;
+  seats: number | null;
+  status: string;
+  subject_id: string;
+  subject_type: string;
+  synced_at: Generated<Timestamp>;
+  updated_at: Generated<Timestamp>;
+}
+
+export interface AppTextItems {
+  content: string | null;
+  content_bytes: number;
+  network_space_id: string | null;
+  share_id: string;
+  updated_at: Generated<Timestamp>;
+  updated_by_device_id: string | null;
+  version: Generated<number>;
+}
+
+export interface AppUploadVolumeCharges {
+  charged_at: Generated<Timestamp>;
+  kib: number;
+  network_key: string | null;
+  refunded_at: Timestamp | null;
+  share_id: string;
+  window_start: Timestamp;
+}
+
+export interface AppUserFlags {
+  billing_dispute_count: Generated<number>;
+  notes: string | null;
+  reason: string | null;
+  suspended_at: Timestamp | null;
+  updated_at: Generated<Timestamp>;
+  upload_restricted: Generated<boolean>;
+  user_id: string;
+}
+
 export interface DB {
+  "app.abuse_reports": AppAbuseReports;
+  "app.audit_events": AppAuditEvents;
+  "app.billing_checkouts": AppBillingCheckouts;
+  "app.billing_customers": AppBillingCustomers;
+  "app.billing_disputes": AppBillingDisputes;
+  "app.billing_events": AppBillingEvents;
+  "app.devices": AppDevices;
+  "app.downloads": AppDownloads;
+  "app.entitlement_overrides": AppEntitlementOverrides;
+  "app.files": AppFiles;
+  "app.idempotency_keys": AppIdempotencyKeys;
+  "app.job_heartbeats": AppJobHeartbeats;
+  "app.link_grants": AppLinkGrants;
+  "app.link_sessions": AppLinkSessions;
+  "app.merge_intents": AppMergeIntents;
+  "app.network_egress_ranges": AppNetworkEgressRanges;
+  "app.network_presence": AppNetworkPresence;
+  "app.network_spaces": AppNetworkSpaces;
+  "app.object_deletions": AppObjectDeletions;
+  "app.profiles": AppProfiles;
   "app.rate_counters": AppRateCounters;
+  "app.room_invites": AppRoomInvites;
+  "app.room_members": AppRoomMembers;
+  "app.rooms": AppRooms;
   "app.runtime_flags": AppRuntimeFlags;
+  "app.share_extension_files": AppShareExtensionFiles;
+  "app.share_links": AppShareLinks;
+  "app.shares": AppShares;
+  "app.storage_reconcile_runs": AppStorageReconcileRuns;
+  "app.storage_reservations": AppStorageReservations;
+  "app.storage_usage": AppStorageUsage;
+  "app.subscriptions": AppSubscriptions;
+  "app.text_items": AppTextItems;
+  "app.upload_volume_charges": AppUploadVolumeCharges;
+  "app.user_flags": AppUserFlags;
 }
